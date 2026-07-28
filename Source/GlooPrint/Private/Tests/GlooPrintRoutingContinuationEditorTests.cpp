@@ -202,7 +202,7 @@ public:
         {
             CheckUnchanged(TEXT("Escape during F"));
             BeginFormat();
-            Target->NodeComment = TEXT("Edited while the layout was pending");
+            Target->NodePosX += 160;
             Before = SerializeNodes(*Fixture->Graph);
             Phase = 2; Frames = 0; return false;
         }
@@ -232,7 +232,7 @@ public:
         }
         if (Phase == 5)
         {
-            if (FIntPoint(Target->NodePosX, Target->NodePosY) == FIntPoint(6000, 5000))
+            if (FIntPoint(Target->NodePosX, Target->NodePosY) == PendingTarget)
             {
                 Test.TestEqual(TEXT("Pending planning never opens a transaction"), GEditor->Trans->GetQueueLength(), Queue);
                 Test.TestTrue(TEXT("Pending computation preserves all graph bytes"), SerializeNodes(*Fixture->Graph) == Before);
@@ -249,7 +249,7 @@ public:
             Test.TestTrue(TEXT("Selected source remains the anchor"), Source->NodePosX == 0 && Source->NodePosY == 0 && Editor->GetSelectedNodes().Contains(Source));
             After = SerializeNodes(*Fixture->Graph);
             Test.TestTrue(TEXT("Resumed F undo succeeds"), GEditor->UndoTransaction());
-            Test.TestTrue(TEXT("Undo restores exact graph including the intervening comment edit"), SerializeNodes(*Fixture->Graph) == Before);
+            Test.TestTrue(TEXT("Undo restores exact graph including the intervening position edit"), SerializeNodes(*Fixture->Graph) == Before);
             Test.TestTrue(TEXT("Resumed F redo succeeds"), GEditor->RedoTransaction());
             Test.TestTrue(TEXT("Redo restores exact formatted result"), SerializeNodes(*Fixture->Graph) == After);
             Before = After; Queue = GEditor->Trans->GetQueueLength();
@@ -271,6 +271,7 @@ private:
     void BeginFormat()
     {
         FSlateApplication::Get().SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
+        PendingTarget = FIntPoint(Target->NodePosX, Target->NodePosY);
         Test.TestTrue(TEXT("Actual F starts a slow native graph plan"), PressF());
         CheckUnchanged(TEXT("F yields before applying its pending plan"));
     }
@@ -295,6 +296,7 @@ private:
     TSharedPtr<SGraphEditor> Editor;
     TSharedPtr<SWindow> Window;
     FFormatPlan Plan;
+    FIntPoint PendingTarget;
     TArray<uint8> Before, After;
     EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
     int32 Phase = 0, Frames = 0, Queue = 0;

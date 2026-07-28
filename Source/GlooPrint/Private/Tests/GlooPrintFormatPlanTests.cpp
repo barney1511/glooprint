@@ -58,13 +58,13 @@ public:
             Before = SerializeNodes(*Fixture->Graph);
             const auto NativeComment = Panel->GetNodeWidgetFromGuid(Comment->NodeGuid);
             const auto OriginalWidgetReference = Comment->DEPRECATED_NodeWidget;
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            FormatQueue = GEditor->Trans->GetQueueLength();
             const bool bDirty = Fixture->Graph->GetOutermost()->IsDirty();
             if (!Test.TestTrue(TEXT("Build read-only layout and routing plan"),
                 PlanFormatGraph(Fixture->Graph, Scale, {Fixture->Branch->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return Finish(); }
             Test.TestTrue(TEXT("Planning preserves every serialized node/pin value"), Before == SerializeNodes(*Fixture->Graph));
             Test.TestEqual(TEXT("Planning never creates or removes graph nodes"), Fixture->Graph->Nodes.Num(), 3);
-            Test.TestEqual(TEXT("Planning creates no transaction"), GEditor->Trans->GetQueueLength(), Queue);
+            Test.TestEqual(TEXT("Planning creates no transaction"), GEditor->Trans->GetQueueLength(), FormatQueue);
             Test.TestEqual(TEXT("Planning preserves dirty state"), Fixture->Graph->GetOutermost()->IsDirty(), bDirty);
             Test.TestTrue(TEXT("Proposed title measurement preserves live widget identity"), Comment->DEPRECATED_NodeWidget == OriginalWidgetReference &&
                 Panel->GetNodeWidgetFromGuid(Comment->NodeGuid) == NativeComment);
@@ -86,9 +86,14 @@ public:
             Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F executes validated format"), Slate.ProcessKeyDownEvent(KeyEvent()));
+            Phase = 10; Frames = 0; return false;
+        }
+        if (Phase == 10)
+        {
+            if (GEditor->Trans->GetQueueLength() == FormatQueue) { return false; }
             After = SerializeNodes(*Fixture->Graph);
             Test.TestTrue(TEXT("Validated F actually changes the layout"), After != Before);
-            Test.TestEqual(TEXT("All stabilization/repair work leads to one transaction"), GEditor->Trans->GetQueueLength(), Queue + 1);
+            Test.TestEqual(TEXT("All stabilization/repair work leads to one transaction"), GEditor->Trans->GetQueueLength(), FormatQueue + 1);
             for (UEdGraphNode* Node : Fixture->Graph->Nodes)
             {
                 const int32 I = Plan.Snapshot.Nodes.IndexOfByPredicate([Node](const auto& N) { return N.Geometry.Id == Node->NodeGuid; });
@@ -158,7 +163,7 @@ public:
         Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
         Slate.ProcessKeyDownEvent(KeyEvent());
         Test.TestTrue(TEXT("Repeated actual F is an exact no-op"), SerializeNodes(*Fixture->Graph) == After);
-        Test.TestEqual(TEXT("Validated no-op adds no transaction"), GEditor->Trans->GetQueueLength(), Queue);
+        Test.TestEqual(TEXT("Validated no-op adds no transaction"), GEditor->Trans->GetQueueLength(), FormatQueue);
         FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
         Test.TestEqual(TEXT("Planning/formatting never pans the view"), AfterView, View);
         Test.TestEqual(TEXT("Planning/formatting never changes zoom"), AfterZoom, Zoom);
@@ -202,7 +207,7 @@ private:
     FVector2f View;
     float Zoom = 0;
     double Deadline = 0;
-    int32 Phase = 0, Frames = 0, CommentIndex = INDEX_NONE;
+    int32 Phase = 0, Frames = 0, CommentIndex = INDEX_NONE, FormatQueue = 0;
     bool bOriginalEnabled = true, bRestore = false;
 };
 

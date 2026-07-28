@@ -472,22 +472,40 @@ public:
             Test.TestTrue(TEXT("Refused F never formats later after its restriction ends"), Before == SerializeNodes(*Fixture->Graph));
             Test.TestFalse(TEXT("Refused F leaves the owned package clean on later frames"), Package->IsDirty());
             Editor->GetViewLocation(View, Zoom);
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            FormatQueue = GEditor->Trans->GetQueueLength();
             Slate.SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Native graph panel receives keyboard focus"), Slate.GetKeyboardFocusedWidget().Get() == Editor->GetGraphPanel());
             Test.TestTrue(TEXT("Registered F command handles native key event"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+            Phase = 10; Frames = 0; return false;
+        }
+        if (Phase == 10)
+        {
+            if (GEditor->Trans->GetQueueLength() == FormatQueue)
+            {
+                if (Frames < 120) { return false; }
+                Test.AddError(TEXT("Focused F did not apply within 120 frames."));
+                Window->RequestDestroyWindow(); return true;
+            }
             After = SerializeNodes(*Fixture->Graph, &AfterNodeBytes);
             AfterProperties = DescribeNodes(*Fixture->Graph);
             Test.TestTrue(TEXT("F actually formats the fixture"), Before != After);
-            Test.TestEqual(TEXT("F creates one undo entry"), GEditor->Trans->GetQueueLength(), Queue + 1);
+            Test.TestEqual(TEXT("F creates one undo entry"), GEditor->Trans->GetQueueLength(), FormatQueue + 1);
             Test.TestTrue(TEXT("An actual layout edit marks the owned package dirty"), Package->IsDirty());
             Package->SetDirtyFlag(false);
             Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, true, 0, 0));
-            Test.TestEqual(TEXT("Key repeat creates no undo entry"), GEditor->Trans->GetQueueLength(), Queue + 1);
+            Test.TestEqual(TEXT("Key repeat creates no undo entry"), GEditor->Trans->GetQueueLength(), FormatQueue + 1);
             Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
+            Phase = 11; Frames = 0; return false;
+        }
+        if (Phase == 11)
+        {
             Test.TestTrue(TEXT("Second actual F is a cold no-op"), After == SerializeNodes(*Fixture->Graph));
-            Test.TestEqual(TEXT("No-op F creates no undo entry"), GEditor->Trans->GetQueueLength(), Queue + 1);
+            Test.TestEqual(TEXT("No-op F creates no undo entry"), GEditor->Trans->GetQueueLength(), FormatQueue + 1);
             Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
+            Phase = 12; Frames = 0; return false;
+        }
+        if (Phase == 12)
+        {
             Test.TestFalse(TEXT("Repeated no-op F does not dirty a clean package"), Package->IsDirty());
             const auto Cache = Editor->GetGraphPanel()->GetMetaData<FMeasurementCache>();
             if (Test.TestTrue(TEXT("Open graph owns its geometry cache"), Cache.IsValid()))
@@ -625,7 +643,7 @@ private:
     bool bRestoreStyle = false, bPanelEditable = true;
     FVector2f View;
     float Zoom = 1;
-    int32 Frames = 0, Phase = 0, RouteBuilds = 0, NoOpQueue = 0;
+    int32 Frames = 0, Phase = 0, RouteBuilds = 0, NoOpQueue = 0, FormatQueue = 0;
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFormatFocusTest, "GlooPrint.Editor.FocusedShortcut",

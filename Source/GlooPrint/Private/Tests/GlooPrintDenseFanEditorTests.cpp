@@ -166,15 +166,20 @@ public:
             }
             else { Test.AddError(Reason); }
 
-            const int32 Queue = GEditor->Trans->GetQueueLength();
-            FVector2f View; float Zoom; Editor->GetViewLocation(View, Zoom);
+            FormatQueue = GEditor->Trans->GetQueueLength();
+            Editor->GetViewLocation(FormatView, FormatZoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F formats the dense fan"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+            Phase = 10; Frames = 0; return false;
+        }
+        if (Phase == 10)
+        {
+            if (GEditor->Trans->GetQueueLength() == FormatQueue) { return false; }
             After = SerializeNodes(*Fixture->Graph);
             Test.TestTrue(TEXT("F moves the scattered fan"), Before != After);
-            Test.TestEqual(TEXT("Dense fan formatting is one undo step"), GEditor->Trans->GetQueueLength(), Queue + 1);
+            Test.TestEqual(TEXT("Dense fan formatting is one undo step"), GEditor->Trans->GetQueueLength(), FormatQueue + 1);
             FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
-            Test.TestEqual(TEXT("Dense F preserves camera"), AfterView, View); Test.TestEqual(TEXT("Dense F preserves zoom"), AfterZoom, Zoom);
+            Test.TestEqual(TEXT("Dense F preserves camera"), AfterView, FormatView); Test.TestEqual(TEXT("Dense F preserves zoom"), AfterZoom, FormatZoom);
             Test.TestTrue(TEXT("Dense fan undo succeeds"), GEditor->UndoTransaction());
             Test.TestTrue(TEXT("Dense fan undo restores every serialized value"), SerializeNodes(*Fixture->Graph) == Before);
             Test.TestTrue(TEXT("Dense fan redo succeeds"), GEditor->RedoTransaction());
@@ -375,6 +380,9 @@ private:
     FFormatPlan Plan;
     TArray<uint8> Before, After;
     FVector2D OriginalCursor;
+    FVector2f FormatView;
+    float FormatZoom = 0;
+    int32 FormatQueue = 0;
     FGuid HoverTarget;
     FRouteKey LastBranch;
     double Deadline = 0, CaptureAfter = 0;
