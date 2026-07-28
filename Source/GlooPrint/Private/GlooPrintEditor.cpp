@@ -460,6 +460,7 @@ void FEditor::ShowProgress()
 {
     if (!Pending || Progress.IsValid() || FPlatformTime::Seconds() - Pending->StartedAt < 0.25) { return; }
     FNotificationInfo Info(LOCTEXT("FormattingProgress", "Formatting Blueprint graph…"));
+    if (const auto Panel = Pending->Panel.Pin()) { Info.ForWindow = FSlateApplication::Get().FindWidgetWindow(Panel.ToSharedRef()); }
     Info.bFireAndForget = false; Info.bUseThrobber = true;
     Info.ButtonDetails.Add(FNotificationButtonInfo(LOCTEXT("CancelFormat", "Cancel"),
         LOCTEXT("CancelFormatTip", "Leave the graph unchanged."), FSimpleDelegate::CreateSP(this, &FEditor::CancelPending)));

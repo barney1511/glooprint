@@ -163,7 +163,7 @@ public:
         Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
         Slate.ProcessKeyDownEvent(KeyEvent());
         Test.TestTrue(TEXT("Repeated actual F is an exact no-op"), SerializeNodes(*Fixture->Graph) == After);
-        Test.TestEqual(TEXT("Validated no-op adds no transaction"), GEditor->Trans->GetQueueLength(), FormatQueue);
+        Test.TestEqual(TEXT("Validated no-op adds no transaction"), GEditor->Trans->GetQueueLength(), Queue);
         FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
         Test.TestEqual(TEXT("Planning/formatting never pans the view"), AfterView, View);
         Test.TestEqual(TEXT("Planning/formatting never changes zoom"), AfterZoom, Zoom);

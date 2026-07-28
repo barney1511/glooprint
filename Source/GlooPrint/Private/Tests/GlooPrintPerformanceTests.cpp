@@ -141,6 +141,53 @@ private:
     FString Csv = TEXT("family,nodes,pins,links,sample,layout_ms,routing_ms,total_ms,fallbacks,bends,curves,search_expansions,retained_route_bytes\n");
 };
 
+class FLayoutSliceBenchmark final : public IAutomationLatentCommand
+{
+public:
+    FLayoutSliceBenchmark(FAutomationTestBase& InTest, FString InFamily) : Test(InTest), Family(MoveTemp(InFamily)) {}
+    virtual bool Update() override
+    {
+        if (!Job)
+        {
+            FLayoutGraph Graph = BenchmarkGraph(5000, Family);
+            AnchorPosition = Graph.Nodes[Graph.Anchor].Geometry.Position;
+            const double Start = FPlatformTime::Seconds();
+            Job = MakeUnique<FLayoutJob>(MoveTemp(Graph), FLayoutSettings());
+            SetupMs = (FPlatformTime::Seconds() - Start) * 1000;
+            return false;
+        }
+        const double Start = FPlatformTime::Seconds();
+        const bool bDone = Job->Advance(0);
+        const double Milliseconds = (FPlatformTime::Seconds() - Start) * 1000;
+        TotalMs += Milliseconds; MaxMs = FMath::Max(MaxMs, Milliseconds); ++Slices;
+        Csv += FString::Printf(TEXT("%d,%.6f,%d\n"), Slices, Milliseconds, bDone ? 1 : 0);
+        if (!bDone && Slices < 4) { return false; }
+        Test.TestTrue(TEXT("All bounded layout candidates finish"), bDone);
+        FLayoutResult Layout; FString Reason;
+        if (Test.TestTrue(TEXT("Layout slices return a complete valid result"), Job->TakeResult(Layout, Reason)))
+        {
+            Test.TestEqual(TEXT("Layout slices retain every node"), Layout.Positions.Num(), 5000);
+            Test.TestEqual(TEXT("Layout slices preserve the chosen anchor"), Layout.Positions[0], AnchorPosition);
+        }
+        else { Test.AddError(Reason); }
+        Test.AddInfo(FString::Printf(TEXT("Layout %s/5000: %d candidates; setup %.3fms, max %.3fms, active layout %.3fms. Diagnostic atomic-unit timing, not p95 or a whole-F responsiveness pass."),
+            *Family, Slices, SetupMs, MaxMs, TotalMs));
+        const FString Directory = FPaths::ProjectSavedDir() / TEXT("GlooPrintBenchmarks");
+        IFileManager::Get().MakeDirectory(*Directory, true);
+        Test.TestTrue(TEXT("Save each atomic layout candidate timing"), FFileHelper::SaveStringToFile(Csv,
+            *(Directory / (TEXT("5000-") + Family + TEXT("-LayoutSlices.csv")))));
+        return true;
+    }
+private:
+    FAutomationTestBase& Test;
+    FString Family;
+    TUniquePtr<FLayoutJob> Job;
+    FIntPoint AnchorPosition;
+    int32 Slices = 0;
+    double SetupMs = 0, MaxMs = 0, TotalMs = 0;
+    FString Csv = TEXT("candidate,elapsed_ms,finished\n");
+};
+
 class FRoutingSliceBenchmark final : public IAutomationLatentCommand
 {
 public:
@@ -220,6 +267,17 @@ void FRoutingSlicesTest::GetTests(TArray<FString>& Names, TArray<FString>& Comma
 bool FRoutingSlicesTest::RunTest(const FString& Parameters)
 {
     ADD_LATENT_AUTOMATION_COMMAND(FRoutingSliceBenchmark(*this, Parameters)); return true;
+}
+
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FLayoutSlicesTest, "GlooPrint.Performance.LayoutSlices.5000",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::PerfFilter)
+void FLayoutSlicesTest::GetTests(TArray<FString>& Names, TArray<FString>& Commands) const
+{
+    for (const TCHAR* Family : {TEXT("Dense"), TEXT("PinHeavy")}) { Names.Add(Family); Commands.Add(Family); }
+}
+bool FLayoutSlicesTest::RunTest(const FString& Parameters)
+{
+    ADD_LATENT_AUTOMATION_COMMAND(FLayoutSliceBenchmark(*this, Parameters)); return true;
 }
 
 }

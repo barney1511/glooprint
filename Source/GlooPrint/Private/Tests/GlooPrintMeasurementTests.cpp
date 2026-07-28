@@ -313,7 +313,7 @@ public:
     virtual bool Update() override
     {
         FSlateApplication& Slate = FSlateApplication::Get();
-        if (Phase >= 3)
+        if (Phase >= 3 && Phase <= 8)
         {
             if (++Frames < 10) { return false; }
             if (Phase == 3)

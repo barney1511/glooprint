@@ -6,8 +6,18 @@
 #include "Editor.h"
 #include "Editor/Transactor.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "IAutomationDriver.h"
+#include "IAutomationDriverModule.h"
+#include "IDriverSequence.h"
+#include "ImageUtils.h"
+#include "Input/HittestGrid.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "SGraphPanel.h"
 #include "ScopedTransaction.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/Text/STextBlock.h"
 #include "Widgets/SWindow.h"
 
 namespace GlooPrint::Tests
@@ -156,7 +166,7 @@ bool FRouteContinuationEditorTest::RunTest(const FString& Parameters)
 class FFormatContinuationCheck final : public IAutomationLatentCommand
 {
 public:
-    explicit FFormatContinuationCheck(FAutomationTestBase& InTest) : Test(InTest) {}
+    explicit FFormatContinuationCheck(FAutomationTestBase& InTest, bool bInProgressCase = false) : Test(InTest), bProgressCase(bInProgressCase) {}
     virtual ~FFormatContinuationCheck() { Restore(); }
     virtual bool Update() override
     {
@@ -166,14 +176,36 @@ public:
             auto* Settings = GetMutableDefault<UGlooPrintSettings>();
             OriginalStyle = Settings->WireStyle; bOriginalEnabled = Settings->bFormattingEnabled; bRestore = true;
             Settings->WireStyle = EGlooPrintWireStyle::Native; Settings->bFormattingEnabled = true; Settings->NotifyChanged();
-            Fixture = MakeUnique<FFixture>(UObject::StaticClass(), false);
+            if (bProgressCase)
+            {
+                Package.Reset(CreatePackage(*FString::Printf(TEXT("/Temp/GlooPrintCancel_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
+                OriginalCursor = Slate.GetCursorPos();
+                auto& Module = IAutomationDriverModule::Get();
+                if (!Test.TestFalse(TEXT("No other input driver owns the disposable progress fixture"), Module.IsEnabled())) { return Finish(); }
+                Module.Enable(); bOwnDriver = true; Slate.UsePlatformCursorForCursorUser(true);
+                Driver = Module.CreateAsyncDriver(); InputState = MakeShared<FInputState>();
+                InputSequence = Driver->CreateSequence();
+                InputSequence->Actions().Wait(FDriverWaitDelegate::CreateLambda([State = InputState](const FTimespan& Elapsed)
+                {
+                    State->bStarted = true;
+                    return State->bStop || Elapsed > FTimespan::FromSeconds(45) ? FDriverWaitResponse::Passed() :
+                        FDriverWaitResponse::Wait(FTimespan::FromMilliseconds(1));
+                }));
+                InputAction = InputSequence->Perform();
+                Slate.SetCursorPos(FVector2D::ZeroVector);
+            }
+            Fixture = MakeUnique<FFixture>(UObject::StaticClass(), false, Package.Get());
             Source = Fixture->Add<UK2Node_ExecutionSequence>({0, 0});
             Target = Fixture->Add<UK2Node_ExecutionSequence>({6000, 5000});
-            for (int32 I = 2; I < 512; ++I) { Source->AddInputPin(); }
-            for (int32 I = 0; I < 512; ++I)
+            for (int32 Group = 0; Group < (bProgressCase ? 4 : 1); ++Group)
             {
-                if (!Test.TestTrue(TEXT("Create native fan for cancellable F"), GetDefault<UEdGraphSchema_K2>()->TryCreateConnection(
-                    Source->GetThenPinGivenIndex(I), Target->FindPinChecked(UEdGraphSchema_K2::PN_Execute)))) { return Finish(); }
+                auto* Fan = Group == 0 ? Source : Fixture->Add<UK2Node_ExecutionSequence>({float(-500 * Group), float(20000 * Group)});
+                for (int32 I = 2; I < 512; ++I) { Fan->AddInputPin(); }
+                for (int32 I = 0; I < 512; ++I)
+                {
+                    if (!Test.TestTrue(TEXT("Create native fan for cancellable F"), GetDefault<UEdGraphSchema_K2>()->TryCreateConnection(
+                        Fan->GetThenPinGivenIndex(I), Target->FindPinChecked(UEdGraphSchema_K2::PN_Execute)))) { return Finish(); }
+                }
             }
             Editor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(true);
             Window = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint cancellable F")))
@@ -186,6 +218,7 @@ public:
         }
         if (FPlatformTime::Seconds() > Deadline) { Test.AddError(TEXT("Native F continuation did not finish in 45 seconds.")); return Finish(); }
         if (++Frames < 12) { return false; }
+        if (bProgressCase) { return CheckProgress(); }
         if (Phase == 0)
         {
             FFormatPlan Reference; FString Reason;
@@ -267,12 +300,162 @@ public:
         return Finish();
     }
 private:
+    struct FProgressWidgets
+    {
+        TSharedPtr<SWindow> Window;
+        TSharedPtr<SNotificationItem> Item;
+        TSharedPtr<SWidget> Cancel;
+        int32 Count = 0;
+    };
+    FProgressWidgets FindProgress()
+    {
+        FProgressWidgets Found;
+        TArray<TSharedRef<SWindow>> Windows;
+        FSlateNotificationManager::Get().GetWindows(Windows);
+        for (const auto& Candidate : Windows)
+        {
+            TArray<TSharedRef<SWidget>> Widgets{Candidate};
+            for (int32 I = 0; I < Widgets.Num() && I < 4096; ++I)
+            {
+                const auto Widget = Widgets[I];
+                if (!Widget->GetVisibility().IsVisible()) { continue; }
+                if (Widget->GetType() == TEXT("STextBlock") &&
+                    StaticCastSharedRef<STextBlock>(Widget)->GetText().ToString() == TEXT("Formatting Blueprint graph…"))
+                {
+                    ++Found.Count; Found.Window = Candidate;
+                    auto Parent = Widget->GetParentWidget();
+                    for (int32 Depth = 0; Parent && Depth < 32; ++Depth, Parent = Parent->GetParentWidget())
+                    {
+                        if (Parent->GetType() == TEXT("SNotificationItemImpl"))
+                        {
+                            Found.Item = StaticCastSharedPtr<SNotificationItem>(Parent); break;
+                        }
+                    }
+                }
+                const auto Children = Widget->GetChildren();
+                for (int32 C = 0; C < Children->Num(); ++C) { Widgets.Add(Children->GetChildAt(C)); }
+            }
+        }
+        if (Found.Item)
+        {
+            TArray<TSharedRef<SWidget>> Widgets{Found.Item.ToSharedRef()};
+            for (int32 I = 0; I < Widgets.Num() && I < 1024; ++I)
+            {
+                const auto Widget = Widgets[I];
+                if (!Widget->GetVisibility().IsVisible()) { continue; }
+                if (Widget->GetType() == TEXT("STextBlock") && StaticCastSharedRef<STextBlock>(Widget)->GetText().ToString() == TEXT("Cancel"))
+                {
+                    auto Parent = Widget->GetParentWidget();
+                    for (int32 Depth = 0; Parent && Depth < 16; ++Depth, Parent = Parent->GetParentWidget())
+                    {
+                        if (Parent->GetType() == TEXT("SButton")) { Found.Cancel = Parent; break; }
+                    }
+                }
+                const auto Children = Widget->GetChildren();
+                for (int32 C = 0; C < Children->Num(); ++C) { Widgets.Add(Children->GetChildAt(C)); }
+            }
+        }
+        return Found;
+    }
+    bool CheckProgress()
+    {
+        auto& Slate = FSlateApplication::Get();
+        if (!InputState->bStarted) { return false; }
+        if (Phase == 0)
+        {
+            Test.TestEqual(TEXT("No progress notification exists before F"), FindProgress().Count, 0);
+            Package->SetDirtyFlag(false); Before = SerializeNodes(*Fixture->Graph); Queue = GEditor->Trans->GetQueueLength();
+            BeginFormat();
+            if (InitialMs < 250) { Test.TestEqual(TEXT("Fast initial input does not flash progress"), FindProgress().Count, 0); }
+            Phase = 1; return false;
+        }
+        if (!Test.TestEqual(TEXT("Pending or canceled progress creates no transaction"), GEditor->Trans->GetQueueLength(), Queue) ||
+            !Test.TestEqual(TEXT("No partial layout moves the target"), FIntPoint(Target->NodePosX, Target->NodePosY), PendingTarget)) { return Finish(); }
+        Test.TestFalse(TEXT("Pending or canceled progress leaves its private package clean"), Package->IsDirty());
+        auto Progress = FindProgress();
+        if (Phase == 1)
+        {
+            if (!Progress.Item || !Progress.Cancel)
+            {
+                if (FPlatformTime::Seconds() - StartedAt > 5)
+                {
+                    Test.AddError(FString::Printf(TEXT("No usable slow-format notification after five seconds (initial F %.3fms, matching labels %d)."), InitialMs, Progress.Count));
+                    return Finish();
+                }
+                return false;
+            }
+            Test.TestEqual(TEXT("Slow F shows exactly one notification"), Progress.Count, 1);
+            Test.TestTrue(TEXT("Progress waits for the slow-job threshold"), FPlatformTime::Seconds() - StartedAt >= 0.25);
+            Test.TestEqual(TEXT("Notification represents pending work"), Progress.Item->GetCompletionState(), SNotificationItem::CS_Pending);
+            Test.TestTrue(TEXT("Duplicate F is coalesced while progress is visible"), PressF());
+            Test.TestTrue(TEXT("Repeated key is ignored while progress is visible"), PressF(true));
+            SeenAt = FPlatformTime::Seconds(); Phase = 2; return false;
+        }
+        if (Phase == 2)
+        {
+            if (FPlatformTime::Seconds() - SeenAt < 0.6) { return false; }
+            if (!Test.TestTrue(TEXT("One usable notification survives duplicate requests"), Progress.Count == 1 && Progress.Item && Progress.Cancel)) { return Finish(); }
+            const auto Geometry = Progress.Cancel->GetCachedGeometry();
+            const FSlateRect Client = Progress.Window->GetClientRectInScreen();
+            if (!Progress.Window->IsVisible() || Geometry.GetLocalSize().X <= 0 || Geometry.GetLocalSize().Y <= 0 ||
+                !Client.ContainsPoint(Geometry.LocalToAbsolute(FVector2f::ZeroVector)) ||
+                !Client.ContainsPoint(Geometry.LocalToAbsolute(Geometry.GetLocalSize())))
+            {
+                if (FPlatformTime::Seconds() - SeenAt < 1) { return false; }
+                Test.AddError(FString::Printf(TEXT("Progress was not painted: visible %d, window %.0fx%.0f, button %.0fx%.0f."),
+                    Progress.Window->IsVisible(), Progress.Window->GetSizeInScreen().X, Progress.Window->GetSizeInScreen().Y,
+                    Geometry.GetLocalSize().X, Geometry.GetLocalSize().Y));
+                return Finish();
+            }
+            TArray<FColor> Pixels; FIntVector Size;
+            if (Test.TestTrue(TEXT("Capture the real slow-format notification"), Slate.TakeScreenshot(Progress.Item.ToSharedRef(), Pixels, Size)))
+            {
+                TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
+                Test.TestTrue(TEXT("Save native progress capture"), FFileHelper::SaveArrayToFile(Png, *(FPaths::ProjectSavedDir() / TEXT("GlooPrint-FormatProgress.png"))));
+            }
+            const FVector2f Mouse = Geometry.LocalToAbsolute(Geometry.GetLocalSize() * 0.5f);
+            const FVector2f Previous = Slate.GetCursorPos(); Slate.SetCursorPos(FVector2D(Mouse));
+            Slate.ProcessMouseMoveEvent(FPointerEvent(FSlateApplication::CursorPointerIndex, Mouse, Previous, {}, EKeys::Invalid, 0, FModifierKeysState()), false);
+            const FWidgetPath Path(Progress.Window->GetHittestGrid().GetBubblePath(Mouse, 0, false, 0));
+            if (!Test.TestTrue(TEXT("Cancel uses the actual painted button hit path"), Path.ContainsWidget(Progress.Cancel.Get()) && Progress.Cancel->IsHovered()))
+            {
+                Test.AddInfo(FString::Printf(TEXT("Cancel hit diagnostics: path %d, hovered %d, mouse %.1f,%.1f, window %.1f,%.1f %.1fx%.1f."),
+                    Path.ContainsWidget(Progress.Cancel.Get()), Progress.Cancel->IsHovered(), Mouse.X, Mouse.Y,
+                    Progress.Window->GetPositionInScreen().X, Progress.Window->GetPositionInScreen().Y,
+                    Progress.Window->GetSizeInScreen().X, Progress.Window->GetSizeInScreen().Y));
+                return Finish();
+            }
+            const double ClickAt = FPlatformTime::Seconds();
+            const FPointerEvent Down(FSlateApplication::CursorPointerIndex, Mouse, Mouse, {EKeys::LeftMouseButton}, EKeys::LeftMouseButton, 0, FModifierKeysState());
+            const FPointerEvent Up(FSlateApplication::CursorPointerIndex, Mouse, Mouse, {}, EKeys::LeftMouseButton, 0, FModifierKeysState());
+            Test.TestTrue(TEXT("Native notification handles Cancel press"), Slate.ProcessMouseButtonDownEvent(Progress.Window->GetNativeWindow(), Down));
+            Test.TestTrue(TEXT("Native notification handles Cancel release"), Slate.ProcessMouseButtonUpEvent(Up));
+            CancelMs = (FPlatformTime::Seconds() - ClickAt) * 1000;
+            Slate.SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
+            CheckUnchanged(TEXT("Native notification Cancel"));
+            CanceledAt = FPlatformTime::Seconds(); Phase = 3; return false;
+        }
+        if (Phase == 3)
+        {
+            if (FPlatformTime::Seconds() - CanceledAt < 1.0 || Progress.Count != 0) { return false; }
+            CheckUnchanged(TEXT("Cancel after returning focus to the graph"));
+            Test.AddInfo(FString::Printf(TEXT("Native progress/2048 links: initial F %.3fms; notification observed %.3fms after F; native Cancel callback %.3fms. Initial F includes atomic capture; not whole-command completion or p95."),
+                InitialMs, (SeenAt - StartedAt) * 1000, CancelMs));
+            InputState->bStop = true; Phase = 4; return false;
+        }
+        if (!InputAction.GetFuture().IsReady()) { return false; }
+        Test.TestTrue(TEXT("Native cursor ownership sequence finishes"), InputAction.GetFuture().Get());
+        return Finish();
+    }
     bool PressF(bool bRepeat = false) { return FSlateApplication::Get().ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, bRepeat, 0, 0)); }
     void BeginFormat()
     {
         FSlateApplication::Get().SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
         PendingTarget = FIntPoint(Target->NodePosX, Target->NodePosY);
-        Test.TestTrue(TEXT("Actual F starts a slow native graph plan"), PressF());
+        const double Start = FPlatformTime::Seconds();
+        const bool bHandled = PressF();
+        if (bProgressCase) { InitialMs = (FPlatformTime::Seconds() - Start) * 1000; StartedAt = Start; }
+        Test.TestTrue(TEXT("Actual F starts a slow native graph plan"), bHandled);
         CheckUnchanged(TEXT("F yields before applying its pending plan"));
     }
     void CheckUnchanged(const FString& Context)
@@ -286,10 +469,27 @@ private:
         if (!bRestore) { return; } bRestore = false;
         if (Window) { Window->RequestDestroyWindow(); }
         Window.Reset(); Editor.Reset();
+        if (InputState) { InputState->bStop = true; }
+        InputSequence.Reset(); Driver.Reset();
+        if (bOwnDriver)
+        {
+            auto& Slate = FSlateApplication::Get();
+            Slate.ReleaseAllPointerCapture(); Slate.CloseToolTip();
+            IAutomationDriverModule::Get().Disable(); bOwnDriver = false;
+            Slate.SetCursorPos(OriginalCursor);
+        }
+        if (Package.IsValid()) { Package->SetDirtyFlag(false); }
         auto* Settings = GetMutableDefault<UGlooPrintSettings>();
         Settings->WireStyle = OriginalStyle; Settings->bFormattingEnabled = bOriginalEnabled; Settings->NotifyChanged();
     }
     FAutomationTestBase& Test;
+    struct FInputState { bool bStarted = false, bStop = false; };
+    TSharedPtr<FInputState> InputState;
+    TSharedPtr<IAsyncAutomationDriver, ESPMode::ThreadSafe> Driver;
+    TSharedPtr<IAsyncDriverSequence, ESPMode::ThreadSafe> InputSequence;
+    TAsyncResult<bool> InputAction;
+    TStrongObjectPtr<UPackage> Package;
+    FVector2D OriginalCursor;
     TUniquePtr<FFixture> Fixture;
     UK2Node_ExecutionSequence* Source = nullptr;
     UK2Node_ExecutionSequence* Target = nullptr;
@@ -301,6 +501,8 @@ private:
     EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
     int32 Phase = 0, Frames = 0, Queue = 0;
     double Deadline = 0;
+    double StartedAt = 0, SeenAt = 0, CanceledAt = 0, InitialMs = 0, CancelMs = 0;
+    bool bProgressCase = false, bOwnDriver = false;
     bool bRestore = false, bOriginalEnabled = true;
 };
 
@@ -309,6 +511,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFormatContinuationEditorTest, "GlooPrint.Edito
 bool FFormatContinuationEditorTest::RunTest(const FString& Parameters)
 {
     ADD_LATENT_AUTOMATION_COMMAND(FFormatContinuationCheck(*this)); return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFormatProgressEditorTest, "GlooPrint.Editor.FormatProgressCancel",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FFormatProgressEditorTest::RunTest(const FString& Parameters)
+{
+    ADD_LATENT_AUTOMATION_COMMAND(FFormatContinuationCheck(*this, true)); return true;
 }
 }
 #endif
