@@ -1,0 +1,10 @@
+{
+  "FileVersion": 3,
+  "EngineAssociation": "5.8",
+  "DisableEnginePluginsByDefault": true,
+  "Plugins": [
+    {"Name": "GlooPrint", "Enabled": true},
+    {"Name": "EngineAssetDefinitions", "Enabled": true},
+    {"Name": "PropertyAccessEditor", "Enabled": true}
+  ]
+}
