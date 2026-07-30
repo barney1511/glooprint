@@ -25,11 +25,12 @@ public:
     const FRouteSet& GetRoutes() const { return Routes; }
     bool IsReady() const { return bReady; }
     int32 GetBuildCount() const { return BuildCount; }
-    bool HasPendingRouting() const { return Routing.IsValid(); }
+    bool HasPendingRouting() const { return Capture.IsValid() || Routing.IsValid(); }
     UEdGraph* GetGraph() const { return Graph.Get(); }
     TSharedPtr<SGraphPanel> GetPanel() const { return Panel.Pin(); }
 
 private:
+    TUniquePtr<FGraphCaptureJob> Capture;
     void Schedule();
     void OnPostTick(float DeltaTime);
     bool Rebuild(float DeltaTime);

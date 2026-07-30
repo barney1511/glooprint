@@ -191,6 +191,57 @@ bool FMeasurementCacheTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMeasurementContinuationTest, "GlooPrint.Measurement.Continuation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMeasurementContinuationTest::RunTest(const FString& Parameters)
+{
+    FFixture Fixture;
+    FString Reason;
+    const auto Before = SerializeNodes(*Fixture.Graph);
+    for (const auto Visibility : {SGraphEditor::Pin_Show, SGraphEditor::Pin_HideNoConnection, SGraphEditor::Pin_HideNoConnectionNoDefault})
+    {
+        FMeasurementOptions Options; Options.PinVisibility = Visibility;
+        FGraphMeasurement Expected, Actual;
+        if (!TestTrue(TEXT("Native synchronous reference measures"), MeasureGraph(Fixture.Graph, 1, Expected, Reason, Options))) { AddError(Reason); return false; }
+        FMeasurementJob Job(Fixture.Graph, 1, Options);
+        TestFalse(TEXT("An expired budget yields after one native node"), Job.Advance(0));
+        TestFalse(TEXT("Pending measurement exposes no partial result"), Job.TakeResult(Actual, Reason));
+        TestTrue(TEXT("Pending output is empty"), Actual.Nodes.IsEmpty());
+        bool bDone = false;
+        for (int32 I = 0; I <= Fixture.Graph->Nodes.Num() && !bDone; ++I) { bDone = Job.Advance(0); }
+        TestTrue(TEXT("A bounded number of continuations completes measurement"), bDone);
+        if (TestTrue(TEXT("Completed native measurement is available"), Job.TakeResult(Actual, Reason))) { Compare(*this, Expected, Actual); }
+        else { AddError(Reason); }
+        TestFalse(TEXT("Completed measurement can only be taken once"), Job.TakeResult(Actual, Reason));
+    }
+    TestTrue(TEXT("Every measurement mode preserves graph state"), Before == SerializeNodes(*Fixture.Graph));
+    FGraphCaptureJob Stale(Fixture.Graph, 1, {});
+    TestFalse(TEXT("Capture yields with original geometry retained"), Stale.Advance(0));
+    Fixture.Graph->Nodes[0]->NodePosX += 16;
+    bool bDone = false;
+    for (int32 I = 0; I <= Fixture.Graph->Nodes.Num() && !bDone; ++I) { bDone = Stale.Advance(0); }
+    FLayoutGraph Snapshot;
+    TestTrue(TEXT("Unnotified edit terminates capture"), bDone);
+    TestFalse(TEXT("Already measured node edit cannot publish mixed geometry"), Stale.TakeResult(Snapshot, Reason));
+    TestTrue(TEXT("Stale capture has no partial nodes or links"), Snapshot.Nodes.IsEmpty() && Snapshot.Edges.IsEmpty());
+    Fixture.Graph->Nodes[0]->NodePosX -= 16;
+    FGraphCaptureJob Reconstructed(Fixture.Graph, 1, {});
+    TestFalse(TEXT("Another capture yields"), Reconstructed.Advance(0));
+    Fixture.Branch->ReconstructNode();
+    bDone = false;
+    for (int32 I = 0; I <= Fixture.Graph->Nodes.Num() && !bDone; ++I) { bDone = Reconstructed.Advance(0); }
+    TestFalse(TEXT("Reconstructed pins cannot publish old identities"), Reconstructed.TakeResult(Snapshot, Reason));
+    TSharedPtr<FMeasurementCache> Cache = MakeShared<FMeasurementCache>();
+    FMeasurementOptions Options; Options.Cache = Cache.Get();
+    FMeasurementJob ClosedCache(Fixture.Graph, 1, Options);
+    TestFalse(TEXT("Cached measurement starts cooperatively"), ClosedCache.Advance(0));
+    Cache.Reset();
+    TestTrue(TEXT("Closed cache terminates pending measurement"), ClosedCache.Advance(0));
+    FGraphMeasurement Measured;
+    TestFalse(TEXT("A job does not retain closed cache ownership"), ClosedCache.TakeResult(Measured, Reason));
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGraphSnapshotTest, "GlooPrint.Editor.AnchorRulesAndConnectionValidation",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -257,7 +308,7 @@ bool FFormatTransactionTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("Stale position rejected before transaction"), ApplyLayout(Fixture.Graph, Snapshot, Layout, Changed, Reason));
     --Fixture.Branch->NodePosX;
     TestTrue(TEXT("Rejected application preserves original graph"), Before == SerializeNodes(*Fixture.Graph));
-    const int32 QueueBefore = GEditor->Trans->GetQueueLength();
+    const int32 QueueBefore = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
     if (!TestTrue(TEXT("Apply fixture in editor transaction"), ApplyLayout(Fixture.Graph, Snapshot, Layout, Changed, Reason)))
     {
         AddError(Reason); return false;
@@ -313,7 +364,7 @@ public:
     virtual bool Update() override
     {
         FSlateApplication& Slate = FSlateApplication::Get();
-        if (Phase >= 3 && Phase <= 8)
+        if ((Phase >= 3 && Phase <= 8) || Phase == 13)
         {
             if (++Frames < 10) { return false; }
             if (Phase == 3)
@@ -335,10 +386,17 @@ public:
                     Test.AddInfo(TEXT("Serialized difference already exists before reopened F:"));
                     ReportNodeDifferences(Test, AfterProperties, *Fixture->Graph, &AfterNodeBytes);
                 }
-                const int32 Queue = GEditor->Trans->GetQueueLength();
+                NoOpQueue = GEditor->Trans->GetQueueLength();
                 Package->SetDirtyFlag(false);
                 Slate.SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
                 Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
+                Phase = 13; Frames = 0; return false;
+            }
+            if (Phase == 13)
+            {
+                const auto PendingCache = Editor->GetGraphPanel()->GetMetaData<FMeasurementCache>();
+                if (PendingCache && PendingCache->GetEntryCount() != Fixture->Graph->Nodes.Num() && Frames < 120) { return false; }
+                const int32 Queue = NoOpQueue;
                 if (!Test.TestTrue(TEXT("Reopened graph formats as a cold no-op"), After == SerializeNodes(*Fixture->Graph)))
                 {
                     ReportNodeDifferences(Test, AfterProperties, *Fixture->Graph, &AfterNodeBytes);
@@ -943,6 +1001,29 @@ public:
         {
             return false;
         }
+        if (FormatPhase != 0)
+        {
+            if (FormatPhase == 1)
+            {
+                if (BeforeFormat == SerializeNodes(*Fixture->Graph))
+                {
+                    if (Frames < 120) { return false; }
+                    Test.AddError(TEXT("Hidden-pin F did not finish within120 frames.")); return Finish();
+                }
+                Formatted = SerializeNodes(*Fixture->Graph);
+                Test.TestTrue(TEXT("F formats graph in its hidden-pin mode"), BeforeFormat != Formatted);
+                Test.TestEqual(TEXT("Hidden-pin format creates one undo entry"), GEditor->Trans->GetQueueLength(), FormatQueue + 1);
+                FSlateApplication::Get().ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
+                FormatPhase = 2; Frames = 0; return false;
+            }
+            Test.TestTrue(TEXT("Hidden-pin second format is unchanged"), Formatted == SerializeNodes(*Fixture->Graph));
+            Test.TestEqual(TEXT("Hidden-pin no-op creates no undo entry"), GEditor->Trans->GetQueueLength(), FormatQueue + 1);
+            Test.TestTrue(TEXT("Hidden-pin layout undo succeeds"), GEditor->UndoTransaction());
+            Test.TestTrue(TEXT("Hidden-pin undo restores exact original graph"), BeforeFormat == SerializeNodes(*Fixture->Graph));
+            Test.TestTrue(TEXT("Hidden-pin layout redo succeeds"), GEditor->RedoTransaction());
+            Test.TestTrue(TEXT("Hidden-pin redo restores exact formatted graph"), Formatted == SerializeNodes(*Fixture->Graph));
+            return Finish();
+        }
         FString Reason;
         const float LayoutScale = Editor->GetCachedGeometry().GetAccumulatedLayoutTransform().GetScale();
         if (!bMeasuredOffscreen)
@@ -1063,21 +1144,12 @@ public:
         }
         if (Options.PinVisibility != SGraphEditor::Pin_Show)
         {
-            const auto Before = SerializeNodes(*Fixture->Graph);
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            BeforeFormat = SerializeNodes(*Fixture->Graph);
+            FormatQueue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
             auto& Slate = FSlateApplication::Get();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
-            const auto Formatted = SerializeNodes(*Fixture->Graph);
-            Test.TestTrue(TEXT("F formats graph in its hidden-pin mode"), Before != Formatted);
-            Test.TestEqual(TEXT("Hidden-pin format creates one undo entry"), GEditor->Trans->GetQueueLength(), Queue + 1);
-            Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
-            Test.TestTrue(TEXT("Hidden-pin second format is unchanged"), Formatted == SerializeNodes(*Fixture->Graph));
-            Test.TestEqual(TEXT("Hidden-pin no-op creates no undo entry"), GEditor->Trans->GetQueueLength(), Queue + 1);
-            Test.TestTrue(TEXT("Hidden-pin layout undo succeeds"), GEditor->UndoTransaction());
-            Test.TestTrue(TEXT("Hidden-pin undo restores exact original graph"), Before == SerializeNodes(*Fixture->Graph));
-            Test.TestTrue(TEXT("Hidden-pin layout redo succeeds"), GEditor->RedoTransaction());
-            Test.TestTrue(TEXT("Hidden-pin redo restores exact formatted graph"), Formatted == SerializeNodes(*Fixture->Graph));
+            FormatPhase = 1; Frames = 0; return false;
         }
         return Finish();
     }
@@ -1099,7 +1171,8 @@ private:
     FGraphMeasurement Offscreen;
     FLayoutResult OffscreenLayout;
     FMeasurementOptions Options;
-    int32 Frames = 0;
+    TArray<uint8> BeforeFormat, Formatted;
+    int32 Frames = 0, FormatPhase = 0, FormatQueue = 0;
     bool bMeasuredOffscreen = false;
 };
 

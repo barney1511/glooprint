@@ -369,56 +369,129 @@ bool ValidateMeasurementGraph(UEdGraph* Graph, FString& OutReason)
     return true;
 }
 
+struct FMeasurementJob::FState
+{
+    struct FNode
+    {
+        TWeakObjectPtr<UEdGraphNode> Node;
+        TArray<uint8> Signature;
+    };
+    TWeakObjectPtr<UEdGraph> Graph;
+    TWeakPtr<FMeasurementCache> Cache;
+    TArray<FNode> Nodes;
+    FGraphMeasurement Result;
+    FString Reason;
+    SGraphEditor::EPinVisibility Visibility;
+    float Scale;
+    uint64 Revision = 0;
+    int32 Next = 0;
+    bool bHasCache = false, bStarted = false, bDone = false, bTaken = false, bNeedsRetry = false;
+};
+
+FMeasurementJob::FMeasurementJob(UEdGraph* Graph, float LayoutScale, const FMeasurementOptions& Options)
+    : State(MakeUnique<FState>())
+{
+    State->Graph = Graph; State->Scale = LayoutScale; State->Visibility = Options.PinVisibility;
+    State->bHasCache = Options.Cache != nullptr;
+    if (Options.Cache) { State->Cache = Options.Cache->AsShared(); }
+}
+FMeasurementJob::~FMeasurementJob() = default;
+
+bool FMeasurementJob::Advance(double Deadline)
+{
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_MeasureGraph);
+    auto& S = *State;
+    if (S.bDone) { return true; }
+    const auto Fail = [&S](const TCHAR* Reason) { S.Reason = Reason; S.bDone = true; return true; };
+    UEdGraph* Graph = S.Graph.Get();
+    if (!ValidateMeasurementGraph(Graph, S.Reason)) { S.bDone = true; return true; }
+    const auto Cache = S.Cache.Pin();
+    if (S.bHasCache && !Cache) { return Fail(TEXT("The measurement cache was closed.")); }
+    if (!S.bStarted)
+    {
+        if (!FMath::IsFinite(S.Scale) || S.Scale <= 0.0f)
+        {
+            return Fail(TEXT("A finite, positive display scale is required."));
+        }
+        if (S.Visibility != SGraphEditor::Pin_Show && S.Visibility != SGraphEditor::Pin_HideNoConnection &&
+            S.Visibility != SGraphEditor::Pin_HideNoConnectionNoDefault)
+        {
+            return Fail(TEXT("The graph pin-visibility mode is invalid."));
+        }
+        if (Cache) { Cache->Begin(Graph, S.Scale, S.Visibility); S.Revision = Cache->GetRevision(); }
+        S.Nodes.Reserve(Graph->Nodes.Num()); S.Result.Nodes.Reserve(Graph->Nodes.Num());
+        for (UEdGraphNode* Node : Graph->Nodes) { S.Nodes.Add({Node, CaptureMeasurementState(*Node)}); }
+        S.bStarted = true;
+    }
+    if (Graph->Nodes.Num() != S.Nodes.Num() || (Cache && Cache->GetRevision() != S.Revision))
+    {
+        return Fail(TEXT("The graph or measurement context changed during capture."));
+    }
+    for (int32 I = 0; I < S.Nodes.Num(); ++I)
+    {
+        if (S.Nodes[I].Node.Get() != Graph->Nodes[I]) { return Fail(TEXT("Node identities changed during capture.")); }
+    }
+    TSharedPtr<SGraphPanel> MeasurementPanel;
+    while (S.Next < S.Nodes.Num())
+    {
+        const auto& Entry = S.Nodes[S.Next];
+        UEdGraphNode* Node = Entry.Node.Get();
+        if (Entry.Signature != CaptureMeasurementState(*Node)) { return Fail(TEXT("A node changed during capture.")); }
+        FMeasuredNode Measured;
+        const FMeasuredNode* Cached = Cache ? Cache->Find(*Node, Entry.Signature) : nullptr;
+        if (Cached) { Measured = *Cached; }
+        else
+        {
+            if (!MeasurementPanel && S.Visibility != SGraphEditor::Pin_Show)
+            {
+                MeasurementPanel = SNew(SGraphPanel).GraphObj(Graph).IsEditable(true).InitialZoomToFit(false);
+                MeasurementPanel->SetPinVisibility(S.Visibility);
+            }
+            if (!MeasureNode(*Node, S.Scale, Measured, S.Reason, MeasurementPanel, S.Visibility, S.bNeedsRetry))
+            {
+                S.Reason = FString::Printf(TEXT("%s: %s"), *Node->GetName(), *S.Reason);
+                S.bDone = true; return true;
+            }
+            if (!S.Graph.IsValid() || !Entry.Node.IsValid()) { return Fail(TEXT("The graph or node closed during measurement.")); }
+            if (Cache)
+            {
+                if (Cache->GetRevision() != S.Revision) { return Fail(TEXT("The measurement context changed during capture.")); }
+                Cache->Store(*Node, Entry.Signature, Measured);
+            }
+        }
+        S.Result.Nodes.Add(MoveTemp(Measured)); ++S.Next;
+        if (FPlatformTime::Seconds() >= Deadline) { return false; }
+    }
+    if (!ValidateMeasurementGraph(Graph, S.Reason)) { S.bDone = true; return true; }
+    if (Graph->Nodes.Num() != S.Nodes.Num()) { return Fail(TEXT("Node identities changed during capture.")); }
+    for (int32 I = 0; I < S.Nodes.Num(); ++I)
+    {
+        const auto& Entry = S.Nodes[I];
+        if (Entry.Node.Get() != Graph->Nodes[I]) { return Fail(TEXT("Node identities changed during capture.")); }
+        if (Entry.Signature != CaptureMeasurementState(*Entry.Node.Get())) { return Fail(TEXT("A node changed during capture.")); }
+    }
+    S.Result.Nodes.Sort([](const FMeasuredNode& A, const FMeasuredNode& B) { return A.Id < B.Id; });
+    S.bDone = true;
+    return true;
+}
+
+bool FMeasurementJob::TakeResult(FGraphMeasurement& Out, FString& Reason, bool* OutNeedsLayoutRetry)
+{
+    auto& S = *State;
+    Out.Nodes.Reset();
+    if (OutNeedsLayoutRetry) { *OutNeedsLayoutRetry = S.bNeedsRetry; }
+    if (!S.bDone || S.bTaken) { Reason = TEXT("Measurement is incomplete or was already taken."); return false; }
+    S.bTaken = true; Reason = S.Reason;
+    if (!Reason.IsEmpty()) { return false; }
+    Out = MoveTemp(S.Result); return true;
+}
+
 bool MeasureGraph(UEdGraph* Graph, float LayoutScale, FGraphMeasurement& OutMeasurement, FString& OutReason,
     const FMeasurementOptions& Options, bool* OutNeedsLayoutRetry)
 {
-    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_MeasureGraph);
-    OutMeasurement.Nodes.Reset();
-    if (OutNeedsLayoutRetry) { *OutNeedsLayoutRetry = false; }
-    if (!ValidateMeasurementGraph(Graph, OutReason)) { return false; }
-    if (!FMath::IsFinite(LayoutScale) || LayoutScale <= 0.0f)
-    {
-        OutReason = TEXT("A finite, positive display scale is required."); return false;
-    }
-    if (Options.PinVisibility != SGraphEditor::Pin_Show && Options.PinVisibility != SGraphEditor::Pin_HideNoConnection &&
-        Options.PinVisibility != SGraphEditor::Pin_HideNoConnectionNoDefault)
-    {
-        OutReason = TEXT("The graph pin-visibility mode is invalid."); return false;
-    }
-    if (Options.Cache) { Options.Cache->Begin(Graph, LayoutScale, Options.PinVisibility); }
-    FGraphMeasurement Candidate;
-    Candidate.Nodes.Reserve(Graph->Nodes.Num());
-    TSharedPtr<SGraphPanel> MeasurementPanel;
-    for (UEdGraphNode* Node : Graph->Nodes)
-    {
-        TArray<uint8> State;
-        if (Options.Cache)
-        {
-            State = CaptureMeasurementState(*Node);
-            if (const FMeasuredNode* Cached = Options.Cache->Find(*Node, State))
-            {
-                Candidate.Nodes.Add(*Cached); continue;
-            }
-        }
-        if (!MeasurementPanel && Options.PinVisibility != SGraphEditor::Pin_Show)
-        {
-            MeasurementPanel = SNew(SGraphPanel).GraphObj(Graph).IsEditable(true).InitialZoomToFit(false);
-            MeasurementPanel->SetPinVisibility(Options.PinVisibility);
-        }
-        FMeasuredNode Measured;
-        bool bNeedsRetry = false;
-        if (!MeasureNode(*Node, LayoutScale, Measured, OutReason, MeasurementPanel, Options.PinVisibility, bNeedsRetry))
-        {
-            if (OutNeedsLayoutRetry) { *OutNeedsLayoutRetry = bNeedsRetry; }
-            OutReason = FString::Printf(TEXT("%s: %s"), *Node->GetName(), *OutReason);
-            return false;
-        }
-        if (Options.Cache) { Options.Cache->Store(*Node, MoveTemp(State), Measured); }
-        Candidate.Nodes.Add(MoveTemp(Measured));
-    }
-    Candidate.Nodes.Sort([](const FMeasuredNode& A, const FMeasuredNode& B) { return A.Id < B.Id; });
-    OutMeasurement = MoveTemp(Candidate);
-    return true;
+    FMeasurementJob Job(Graph, LayoutScale, Options);
+    Job.Advance(TNumericLimits<double>::Max());
+    return Job.TakeResult(OutMeasurement, OutReason, OutNeedsLayoutRetry);
 }
 
 bool MeasureCommentHeader(UEdGraphNode_Comment* Comment, float LayoutScale, int32 ProposedWidth,

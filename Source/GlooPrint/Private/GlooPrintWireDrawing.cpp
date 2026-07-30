@@ -38,7 +38,7 @@ void FRouteCache::Initialize(TSharedRef<SGraphPanel> InPanel)
 void FRouteCache::Shutdown()
 {
     if (bStopped) { return; }
-    bStopped = true; bReady = false; Routes = {}; Routing.Reset();
+    bStopped = true; bReady = false; Routes = {}; Capture.Reset(); Routing.Reset();
     if (const auto Owner = Panel.Pin())
     {
         Owner->Invalidate(EInvalidateWidgetReason::Paint);
@@ -73,7 +73,7 @@ void FRouteCache::ObserveContext()
 void FRouteCache::Invalidate()
 {
     if (bStopped) { return; }
-    bReady = false; Routes = {}; Routing.Reset(); ++Revision; AttemptsLeft = 3;
+    bReady = false; Routes = {}; Capture.Reset(); Routing.Reset(); ++Revision; AttemptsLeft = 3;
     WireStyle = GetDefault<UGlooPrintSettings>()->GetWireStyle();
     if (WireStyle == EGlooPrintWireStyle::Native)
     {
@@ -105,7 +105,7 @@ bool FRouteCache::Rebuild(float DeltaTime)
     const auto Owner = Panel.Pin();
     if (bStopped || !Owner || !Graph.IsValid() || Owner->GetGraphObj() != Graph.Get())
     {
-        Routing.Reset();
+        Capture.Reset(); Routing.Reset();
         return false;
     }
     if (!FSlateApplication::Get().GetPressedMouseButtons().IsEmpty()) { return true; }
@@ -115,14 +115,21 @@ bool FRouteCache::Rebuild(float DeltaTime)
     FString Reason;
     if (!Routing)
     {
-        const uint64 RequestRevision = Revision;
+        if (!Capture)
+        {
+            FMeasurementOptions Options; Options.PinVisibility = PinVisibility;
+            Capture = MakeUnique<FGraphCaptureJob>(Graph.Get(), Scale, TSet<FGuid>(), Options);
+            RoutingRevision = Revision; ++BuildCount;
+        }
+        const uint64 RequestRevision = RoutingRevision;
+        auto Job = MoveTemp(Capture);
+        const bool bFinished = Job->Advance(Deadline);
+        if (bStopped) { return false; }
+        if (Revision != RequestRevision) { return true; }
+        if (!bFinished) { Capture = MoveTemp(Job); return true; }
         FLayoutGraph Snapshot;
         bool bRetry = false;
-        FMeasurementOptions Options; Options.PinVisibility = PinVisibility;
-        const bool bCaptured = Scale > 0 && CaptureGraphForRouting(Graph.Get(), Scale, Snapshot, Reason, Options, &bRetry);
-        ++BuildCount;
-        if (Revision != RequestRevision) { return true; }
-        if (!bCaptured)
+        if (!Job->TakeResult(Snapshot, Reason, &bRetry))
         {
             if (bRetry && AttemptsLeft-- > 0) { return true; }
             Owner->Invalidate(EInvalidateWidgetReason::Paint);

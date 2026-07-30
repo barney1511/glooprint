@@ -71,6 +71,7 @@ private:
         TSet<FGuid> Selection;
         FLayoutSettings Settings;
         EGlooPrintWireStyle Style = EGlooPrintWireStyle::Rounded90;
+        TUniquePtr<FGraphCaptureJob> Capture;
         TUniquePtr<FFormatJob> Job;
         SGraphEditor::EPinVisibility Visibility = SGraphEditor::Pin_Show;
         float Scale = 0;

@@ -43,18 +43,10 @@ bool CanFormatGraph(UEdGraph* Graph, FString& OutReason)
     return true;
 }
 
-static bool CaptureGraphSnapshot(UEdGraph* Graph, float LayoutScale, const TSet<FGuid>& Selection,
-    FLayoutGraph& OutGraph, FString& OutReason, const FMeasurementOptions& MeasurementOptions, bool* OutNeedsLayoutRetry)
+static bool BuildSnapshot(UEdGraph* Graph, FGraphMeasurement Measurement, const TSet<FGuid>& Selection,
+    FLayoutGraph& OutGraph, FString& OutReason)
 {
-    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_Snapshot);
-    OutGraph = FLayoutGraph();
-    if (OutNeedsLayoutRetry) { *OutNeedsLayoutRetry = false; }
-    FGraphMeasurement Measurement;
-    if (!MeasureGraph(Graph, LayoutScale, Measurement, OutReason, MeasurementOptions, OutNeedsLayoutRetry))
-    {
-        return false;
-    }
-
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_BuildSnapshot);
     FLayoutGraph Result;
     Result.Nodes.Reserve(Measurement.Nodes.Num());
     TMap<FGuid, UEdGraphNode*> NodesById;
@@ -164,6 +156,54 @@ static bool CaptureGraphSnapshot(UEdGraph* Graph, float LayoutScale, const TSet<
     }
     OutGraph = MoveTemp(Result);
     return true;
+}
+
+struct FGraphCaptureJob::FState
+{
+    TWeakObjectPtr<UEdGraph> Graph;
+    TSet<FGuid> Selection;
+    FMeasurementJob Measurement;
+    FLayoutGraph Result;
+    FString Reason;
+    bool bDone = false, bTaken = false, bNeedsRetry = false;
+    FState(UEdGraph* InGraph, float Scale, TSet<FGuid> InSelection, const FMeasurementOptions& Options)
+        : Graph(InGraph), Selection(MoveTemp(InSelection)), Measurement(InGraph, Scale, Options) {}
+};
+FGraphCaptureJob::FGraphCaptureJob(UEdGraph* Graph, float Scale, TSet<FGuid> Selection, const FMeasurementOptions& Options)
+    : State(MakeUnique<FState>(Graph, Scale, MoveTemp(Selection), Options)) {}
+FGraphCaptureJob::~FGraphCaptureJob() = default;
+
+bool FGraphCaptureJob::Advance(double Deadline)
+{
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_Snapshot);
+    auto& S = *State;
+    if (S.bDone) { return true; }
+    if (!S.Measurement.Advance(Deadline)) { return false; }
+    FGraphMeasurement Measured;
+    if (S.Measurement.TakeResult(Measured, S.Reason, &S.bNeedsRetry))
+    {
+        BuildSnapshot(S.Graph.Get(), MoveTemp(Measured), S.Selection, S.Result, S.Reason);
+    }
+    S.bDone = true; return true;
+}
+
+bool FGraphCaptureJob::TakeResult(FLayoutGraph& Out, FString& Reason, bool* OutNeedsLayoutRetry)
+{
+    auto& S = *State;
+    Out = {};
+    if (OutNeedsLayoutRetry) { *OutNeedsLayoutRetry = S.bNeedsRetry; }
+    if (!S.bDone || S.bTaken) { Reason = TEXT("Capture is incomplete or was already taken."); return false; }
+    S.bTaken = true; Reason = S.Reason;
+    if (!Reason.IsEmpty()) { return false; }
+    Out = MoveTemp(S.Result); return true;
+}
+
+static bool CaptureGraphSnapshot(UEdGraph* Graph, float Scale, const TSet<FGuid>& Selection,
+    FLayoutGraph& Out, FString& Reason, const FMeasurementOptions& Options, bool* OutNeedsLayoutRetry)
+{
+    FGraphCaptureJob Job(Graph, Scale, Selection, Options);
+    Job.Advance(TNumericLimits<double>::Max());
+    return Job.TakeResult(Out, Reason, OutNeedsLayoutRetry);
 }
 
 bool CaptureGraph(UEdGraph* Graph, float LayoutScale, const TSet<FGuid>& Selection,

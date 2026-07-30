@@ -44,6 +44,18 @@ struct FGraphMeasurement
     TArray<FMeasuredNode> Nodes;
 };
 
+class FMeasurementJob final
+{
+public:
+    FMeasurementJob(UEdGraph* Graph, float LayoutScale, const FMeasurementOptions& Options = {});
+    ~FMeasurementJob();
+    bool Advance(double Deadline);
+    bool TakeResult(FGraphMeasurement& Out, FString& Reason, bool* OutNeedsLayoutRetry = nullptr);
+private:
+    struct FState;
+    TUniquePtr<FState> State;
+};
+
 bool MeasureGraph(UEdGraph* Graph, float LayoutScale, FGraphMeasurement& OutMeasurement, FString& OutReason,
     const FMeasurementOptions& Options = {}, bool* OutNeedsLayoutRetry = nullptr);
 

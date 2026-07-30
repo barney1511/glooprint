@@ -415,21 +415,30 @@ private:
             }
             const FVector2f Mouse = Geometry.LocalToAbsolute(Geometry.GetLocalSize() * 0.5f);
             const FVector2f Previous = Slate.GetCursorPos(); Slate.SetCursorPos(FVector2D(Mouse));
-            Slate.ProcessMouseMoveEvent(FPointerEvent(FSlateApplication::CursorPointerIndex, Mouse, Previous, {}, EKeys::Invalid, 0, FModifierKeysState()), false);
+            const FPointerEvent Move(FSlateApplication::CursorPointerIndex, Mouse, Previous, {}, EKeys::Invalid, 0, FModifierKeysState());
+            Slate.ProcessMouseMoveEvent(Move, false);
             const FWidgetPath Path(Progress.Window->GetHittestGrid().GetBubblePath(Mouse, 0, false, 0));
+            const auto NativePath = Slate.LocateWindowUnderMouse(Mouse, Slate.GetInteractiveTopLevelWindows(), false, 0);
+            Test.AddInfo(FString::Printf(TEXT("Native window selection reaches Cancel: %d. Button interaction is verified through its painted Slate path; OS dispatch is not certified."),
+                NativePath.ContainsWidget(Progress.Cancel.Get())));
+            Slate.RoutePointerMoveEvent(Path, Move, false);
             if (!Test.TestTrue(TEXT("Cancel uses the actual painted button hit path"), Path.ContainsWidget(Progress.Cancel.Get()) && Progress.Cancel->IsHovered()))
             {
                 Test.AddInfo(FString::Printf(TEXT("Cancel hit diagnostics: path %d, hovered %d, mouse %.1f,%.1f, window %.1f,%.1f %.1fx%.1f."),
                     Path.ContainsWidget(Progress.Cancel.Get()), Progress.Cancel->IsHovered(), Mouse.X, Mouse.Y,
                     Progress.Window->GetPositionInScreen().X, Progress.Window->GetPositionInScreen().Y,
                     Progress.Window->GetSizeInScreen().X, Progress.Window->GetSizeInScreen().Y));
+                const FVector2f ActualCursor = Slate.GetCursorPos();
+                const auto Located = Slate.LocateWindowUnderMouse(Mouse, Slate.GetInteractiveTopLevelWindows(), false, 0);
+                Test.AddInfo(FString::Printf(TEXT("Cursor %.1f,%.1f; native window path contains Cancel %d; initial F %.3fms."),
+                    ActualCursor.X, ActualCursor.Y, Located.ContainsWidget(Progress.Cancel.Get()), InitialMs));
                 return Finish();
             }
             const double ClickAt = FPlatformTime::Seconds();
             const FPointerEvent Down(FSlateApplication::CursorPointerIndex, Mouse, Mouse, {EKeys::LeftMouseButton}, EKeys::LeftMouseButton, 0, FModifierKeysState());
             const FPointerEvent Up(FSlateApplication::CursorPointerIndex, Mouse, Mouse, {}, EKeys::LeftMouseButton, 0, FModifierKeysState());
-            Test.TestTrue(TEXT("Native notification handles Cancel press"), Slate.ProcessMouseButtonDownEvent(Progress.Window->GetNativeWindow(), Down));
-            Test.TestTrue(TEXT("Native notification handles Cancel release"), Slate.ProcessMouseButtonUpEvent(Up));
+            Test.TestTrue(TEXT("Native notification handles Cancel press"), Slate.RoutePointerDownEvent(Path, Down).IsEventHandled());
+            Test.TestTrue(TEXT("Native notification handles Cancel release"), Slate.RoutePointerUpEvent(Path, Up).IsEventHandled());
             CancelMs = (FPlatformTime::Seconds() - ClickAt) * 1000;
             Slate.SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
             CheckUnchanged(TEXT("Native notification Cancel"));
@@ -439,7 +448,7 @@ private:
         {
             if (FPlatformTime::Seconds() - CanceledAt < 1.0 || Progress.Count != 0) { return false; }
             CheckUnchanged(TEXT("Cancel after returning focus to the graph"));
-            Test.AddInfo(FString::Printf(TEXT("Native progress/2048 links: initial F %.3fms; notification observed %.3fms after F; native Cancel callback %.3fms. Initial F includes atomic capture; not whole-command completion or p95."),
+            Test.AddInfo(FString::Printf(TEXT("Native progress/2048 links: initial F %.3fms; notification observed %.3fms after F; Slate Cancel callback %.3fms. Initial F includes the first capture slice; not whole-command completion or p95."),
                 InitialMs, (SeenAt - StartedAt) * 1000, CancelMs));
             InputState->bStop = true; Phase = 4; return false;
         }

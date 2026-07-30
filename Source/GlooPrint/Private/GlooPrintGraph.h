@@ -45,6 +45,18 @@ struct FLayoutGraph
     int32 Anchor = INDEX_NONE;
 };
 
+class FGraphCaptureJob final
+{
+public:
+    FGraphCaptureJob(UEdGraph* Graph, float Scale, TSet<FGuid> Selection, const FMeasurementOptions& Options = {});
+    ~FGraphCaptureJob();
+    bool Advance(double Deadline);
+    bool TakeResult(FLayoutGraph& Out, FString& Reason, bool* OutNeedsLayoutRetry = nullptr);
+private:
+    struct FState;
+    TUniquePtr<FState> State;
+};
+
 bool CanFormatGraph(UEdGraph* Graph, FString& OutReason);
 bool CaptureGraph(UEdGraph* Graph, float LayoutScale, const TSet<FGuid>& Selection,
     FLayoutGraph& OutGraph, FString& OutReason, const FMeasurementOptions& MeasurementOptions = {}, bool* OutNeedsLayoutRetry = nullptr);

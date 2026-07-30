@@ -522,17 +522,26 @@ void FEditor::ContinueRequest(FPendingFormat Request, double Deadline)
     FFormatPlan Plan;
     if (!Request.Job)
     {
-        if (Request.AttemptsMade > 0 && !IsPendingCurrent(Request, Slate))
+        if (!Request.Capture && Request.AttemptsMade > 0 && !IsPendingCurrent(Request, Slate))
         {
             CloseProgress(); ReportFormatResult(false, 0, TEXT("Formatting canceled because the graph, selection or display changed.")); return;
         }
-        const auto Cache = Request.Cache.Pin();
-        FMeasurementOptions Options; Options.Cache = Cache.Get(); Options.PinVisibility = Request.Visibility;
-        FLayoutGraph Snapshot;
-        ++Request.AttemptsMade;
-        if (CaptureGraph(Request.Graph.Get(), Request.Scale, Request.Selection, Snapshot, Reason, Options, &bNeedsRetry))
+        if (!Request.Capture)
         {
-            Request.Job = MakeUnique<FFormatJob>(Request.Graph.Get(), MoveTemp(Snapshot), Request.Scale, Request.Settings, Request.Style);
+            const auto Cache = Request.Cache.Pin();
+            FMeasurementOptions Options; Options.Cache = Cache.Get(); Options.PinVisibility = Request.Visibility;
+            ++Request.AttemptsMade;
+            Request.Capture = MakeUnique<FGraphCaptureJob>(Request.Graph.Get(), Request.Scale, Request.Selection, Options);
+        }
+        bFinished = Request.Capture->Advance(Deadline);
+        if (bFinished)
+        {
+            FLayoutGraph Snapshot;
+            if (Request.Capture->TakeResult(Snapshot, Reason, &bNeedsRetry))
+            {
+                Request.Job = MakeUnique<FFormatJob>(Request.Graph.Get(), MoveTemp(Snapshot), Request.Scale, Request.Settings, Request.Style);
+            }
+            Request.Capture.Reset();
         }
     }
     if (Request.Job)
