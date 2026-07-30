@@ -90,9 +90,14 @@ public:
             Test.TestEqual(TEXT("Nested graph needs no native fallback wires"), Plan.Routes.FallbackCount, 0);
             Test.AddInfo(FString::Printf(TEXT("Native nested branches: %d spacing repairs, %d fallbacks."), Plan.SpacingRepairs, Plan.Routes.FallbackCount));
             CheckSwitchGeometry(); CheckPlacement();
-            const int32 Queue = GEditor->Trans->GetQueueLength(); Editor->GetViewLocation(View, Zoom);
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount(); Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F formats nested branches and switch"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+            Phase = 3; return false;
+        }
+        if (Phase == 3)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph);
             Test.TestTrue(TEXT("Nested formatting moves the scattered graph"), Before != After);
             Test.TestEqual(TEXT("Nested formatting is one undo step"), GEditor->Trans->GetQueueLength(), Queue + 1);
@@ -117,9 +122,13 @@ public:
             {
                 Test.TestTrue(TEXT("Nested layout is cold-idempotent"), Cold.Layout.Positions == Plan.Layout.Positions);
             }
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            Queue = GEditor->Trans->GetQueueLength();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
+            Phase = 4; Frames = 0; return false;
+        }
+        if (Phase == 4)
+        {
             Test.TestTrue(TEXT("Repeated F leaves the nested graph exactly unchanged"), SerializeNodes(*Fixture->Graph) == After);
             Test.TestEqual(TEXT("Nested no-op creates no undo entry"), GEditor->Trans->GetQueueLength(), Queue);
             FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
@@ -255,7 +264,7 @@ private:
     FVector2f View;
     float Zoom = 0;
     double Deadline = 0, CaptureAfter = 0;
-    int32 Phase = 0, Frames = 0;
+    int32 Phase = 0, Frames = 0, Queue = 0;
     bool bOriginalEnabled = true, bRestore = false, bConnectionsValid = true;
 };
 

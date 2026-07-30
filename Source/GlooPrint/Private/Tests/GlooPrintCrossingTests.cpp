@@ -149,7 +149,7 @@ public:
         auto* Panel = Editor->GetGraphPanel(); const float Scale = Window->GetDPIScaleFactor() * Slate.GetApplicationScale(); FString Reason;
         if (Phase == 0)
         {
-            Before = SerializeNodes(*Fixture->Graph); const auto Properties = DescribeNodes(*Fixture->Graph);
+            Before = SerializeNodes(*Fixture->Graph); Properties = DescribeNodes(*Fixture->Graph);
             if (!Test.TestTrue(TEXT("Native crossing graph has a valid layout/routing plan"), PlanFormatGraph(Fixture->Graph, Scale, {Inputs[0]->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return Finish(); }
             Test.TestTrue(TEXT("Candidate trials are read-only"), SerializeNodes(*Fixture->Graph) == Before);
             Test.TestTrue(TEXT("Native geometry retains a better candidate than four sweeps"), Plan.Layout.LastCandidateCrossings.IsSet() && Plan.Layout.OrderingCrossings < Plan.Layout.LastCandidateCrossings.GetValue());
@@ -159,9 +159,14 @@ public:
             Test.TestEqual(TEXT("Native crossing fixture has no routing fallback"), Plan.Routes.FallbackCount, 0);
             Test.AddInfo(FString::Printf(TEXT("Native crossing order: %llu retained, %llu after four sweeps, chosen%d; %d spacing repairs, %d fallbacks."),
                 Plan.Layout.OrderingCrossings, Plan.Layout.LastCandidateCrossings.Get(0), Plan.Layout.OrderingSweeps, Plan.SpacingRepairs, Plan.Routes.FallbackCount));
-            const int32 Queue = GEditor->Trans->GetQueueLength(); Editor->GetViewLocation(View, Zoom);
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount(); Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F applies the chosen crossing candidate"), Slate.ProcessKeyDownEvent(KeyEvent()));
+            Phase = 4; return false;
+        }
+        if (Phase == 4)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph); Test.TestTrue(TEXT("F changes the original bipartite layout"), Before != After);
             Test.TestEqual(TEXT("All candidate trials produce one undo step"), GEditor->Trans->GetQueueLength(), Queue + 1);
             const auto Actual = DescribeNodes(*Fixture->Graph);
@@ -189,7 +194,11 @@ public:
                     Test.TestTrue(TEXT("Live and cold paths retain the original planned connection"), Live && Again && Live->Points == Pair.Value.Points && Again->Points == Pair.Value.Points);
                 }
             }
-            const int32 Queue = GEditor->Trans->GetQueueLength(); Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly); Slate.ProcessKeyDownEvent(KeyEvent());
+            Queue = GEditor->Trans->GetQueueLength(); Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly); Slate.ProcessKeyDownEvent(KeyEvent());
+            Phase = 5; Frames = 0; return false;
+        }
+        if (Phase == 5)
+        {
             Test.TestTrue(TEXT("Repeated F with candidate selection is an exact no-op"), SerializeNodes(*Fixture->Graph) == After);
             Test.TestEqual(TEXT("Repeated candidate selection adds no undo step"), GEditor->Trans->GetQueueLength(), Queue);
             FVector2f CurrentView; float CurrentZoom; Editor->GetViewLocation(CurrentView, CurrentZoom);
@@ -255,11 +264,12 @@ private:
     FFormatPlan Plan;
     FRouteKey HoverKey;
     TArray<uint8> Before, After;
+    TMap<FString, FString> Properties;
     FVector2D OriginalCursor;
     FVector2f View;
     float Zoom = 0;
     double Deadline = 0, CaptureAfter = 0;
-    int32 Phase = 0, Frames = 0, Builds = 0;
+    int32 Phase = 0, Frames = 0, Builds = 0, Queue = 0;
     bool bOriginalEnabled = true, bRestore = false, bConnectionsValid = true;
 };
 

@@ -85,16 +85,21 @@ public:
         if (Phase == 0)
         {
             Capture(TEXT("Before"));
-            const auto Before = SerializeNodes(*Fixture->Graph), BeforeValues = SerializeTransactionValues(*Fixture->Graph);
-            const auto Properties = DescribeNodes(*Fixture->Graph);
+            Before = SerializeNodes(*Fixture->Graph); BeforeValues = SerializeTransactionValues(*Fixture->Graph);
+            Properties = DescribeNodes(*Fixture->Graph);
             if (!Test.TestTrue(TEXT("Native multi-return plan computes"), PlanFormatGraph(Fixture->Graph, Scale, {Entry->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return true; }
             Test.TestTrue(TEXT("Planning leaves graph values unchanged"), Before == SerializeNodes(*Fixture->Graph));
             Test.TestEqual(TEXT("All sixteen original connections have routes"), Plan.Routes.Wires.Num(), 16);
             Test.TestEqual(TEXT("Multiple returns and long data need no fallback"), Plan.Routes.FallbackCount, 0);
             CheckGeometry();
-            const int32 Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F formats the retry graph"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+            Phase = 6; return false;
+        }
+        if (Phase == 6)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph);
             const auto AfterValues = SerializeTransactionValues(*Fixture->Graph);
             const auto AfterProperties = DescribeNodes(*Fixture->Graph);
@@ -129,9 +134,13 @@ public:
             FLayoutGraph Shuffled = Plan.Snapshot;
             Algo::Reverse(Shuffled.Edges); FRouteSet ShuffledRoutes;
             if (Test.TestTrue(TEXT("Shuffled original links compute"), ComputeLayoutRoutes(Shuffled, Plan.Layout, ShuffledRoutes, Reason, Style))) { CheckPaths(ShuffledRoutes); }
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            Queue = GEditor->Trans->GetQueueLength();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
+            Phase = 7; Frames = 0; return false;
+        }
+        if (Phase == 7)
+        {
             Test.TestEqual(TEXT("Repeated F creates no transaction"), GEditor->Trans->GetQueueLength(), Queue);
             Test.TestTrue(TEXT("Repeated F leaves every graph value unchanged"), After == SerializeNodes(*Fixture->Graph));
             Capture(TEXT("Overview"));
@@ -283,10 +292,11 @@ private:
     TSharedPtr<SWindow> Window;
     TWeakPtr<FRouteCache> OldCache;
     FFormatPlan Plan;
-    TArray<uint8> After;
+    TArray<uint8> Before, BeforeValues, After;
+    TMap<FString, FString> Properties;
     FVector2f HoverPoint;
     double Deadline = 0;
-    int32 Frames = 0, Phase = 0, HoverIndex = 0, Builds = 0;
+    int32 Frames = 0, Phase = 0, HoverIndex = 0, Builds = 0, Queue = 0;
     bool bRestore = false, bOriginalEnabled = true, bLinksValid = true;
 };
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FReturnBundleRoundedTest, "GlooPrint.Editor.ReturnAndLongBundles.Rounded",

@@ -80,7 +80,7 @@ public:
         FString Reason;
         if (Phase == 0)
         {
-            Before = SerializeNodes(*Fixture->Graph); const auto Properties = DescribeNodes(*Fixture->Graph);
+            Before = SerializeNodes(*Fixture->Graph); Properties = DescribeNodes(*Fixture->Graph);
             if (!Test.TestTrue(TEXT("Connected reroutes have a complete format plan"), PlanFormatGraph(Fixture->Graph, Scale, {Entry->NodeGuid}, Plan, Reason)))
             {
                 Test.AddError(Reason); return Finish();
@@ -91,9 +91,14 @@ public:
             Test.TestEqual(TEXT("Connected reroutes need no native fallback wires"), Plan.Routes.FallbackCount, 0);
             Test.AddInfo(FString::Printf(TEXT("Native reroutes: %d spacing repairs, %d fallbacks."), Plan.SpacingRepairs, Plan.Routes.FallbackCount));
             CheckGeometry(false); CheckWaypoints();
-            const int32 Queue = GEditor->Trans->GetQueueLength(); Editor->GetViewLocation(View, Zoom);
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount(); Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F formats through existing reroutes"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+            Phase = 5; return false;
+        }
+        if (Phase == 5)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph); Test.TestTrue(TEXT("F moves the scattered reroute graph"), Before != After);
             Test.TestEqual(TEXT("Reroute layout is one undo step"), GEditor->Trans->GetQueueLength(), Queue + 1);
             const auto AfterProperties = DescribeNodes(*Fixture->Graph);
@@ -129,9 +134,13 @@ public:
                     Test.TestTrue(TEXT("Reroute paths are cold-idempotent"), Wire && Wire->Points == Pair.Value.Points);
                 }
             }
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            Queue = GEditor->Trans->GetQueueLength();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
+            Phase = 6; Frames = 0; return false;
+        }
+        if (Phase == 6)
+        {
             Test.TestTrue(TEXT("Repeated F leaves reroute data exactly unchanged"), SerializeNodes(*Fixture->Graph) == After);
             Test.TestEqual(TEXT("Reroute no-op adds no undo step"), GEditor->Trans->GetQueueLength(), Queue);
             FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
@@ -279,11 +288,12 @@ private:
     EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
     FFormatPlan Plan;
     TArray<uint8> Before, After;
+    TMap<FString, FString> Properties;
     FVector2D OriginalCursor;
     FVector2f View;
     float Zoom = 0;
     double Deadline = 0, CaptureAfter = 0;
-    int32 Phase = 0, Frames = 0, Builds = 0;
+    int32 Phase = 0, Frames = 0, Builds = 0, Queue = 0;
     bool bOriginalEnabled = true, bRestore = false, bConnectionsValid = true;
 };
 

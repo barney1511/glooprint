@@ -83,7 +83,7 @@ public:
         if (Phase == 0)
         {
             CheckMembership(); Capture(TEXT("Before"));
-            Before = SerializeNodes(*Fixture->Graph); const auto Properties = DescribeNodes(*Fixture->Graph);
+            Before = SerializeNodes(*Fixture->Graph); Properties = DescribeNodes(*Fixture->Graph);
             for (UEdGraphNode* Node : Fixture->Graph->Nodes) { OriginalPositions.Add(Node, {Node->NodePosX, Node->NodePosY}); }
             if (!Test.TestTrue(TEXT("Original comment memberships admit a complete format plan"), PlanFormatGraph(Fixture->Graph, Scale, {Entry->NodeGuid}, Plan, Reason)))
             {
@@ -94,9 +94,14 @@ public:
             Test.TestEqual(TEXT("All original comment and ordinary identities are planned"), Plan.Snapshot.Nodes.Num(), 8);
             Test.TestEqual(TEXT("Comments preserve all four execution connections"), Plan.Routes.Wires.Num(), 4);
             Test.TestEqual(TEXT("Comment fixture routes clear node bodies and headers"), Plan.Routes.FallbackCount, 0);
-            const int32 Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount(); Editor->GetViewLocation(View, Zoom);
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount(); Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F formats with comments selected alongside the entry anchor"), Slate.ProcessKeyDownEvent(KeyEvent()));
+            Phase = 5; return false;
+        }
+        if (Phase == 5)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph); Test.TestTrue(TEXT("Comment fixture layout changes"), Before != After);
             Test.TestEqual(TEXT("Comment formatting creates exactly one undo step"), GEditor->Trans->GetQueueLength(), Queue + 1);
             const auto AfterProperties = DescribeNodes(*Fixture->Graph);
@@ -130,8 +135,12 @@ public:
                         Repeated && Live && Repeated->Points == Pair.Value.Points && Live->Points == Pair.Value.Points);
                 }
             }
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            Queue = GEditor->Trans->GetQueueLength();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly); Slate.ProcessKeyDownEvent(KeyEvent());
+            Phase = 6; Frames = 0; return false;
+        }
+        if (Phase == 6)
+        {
             Test.TestTrue(TEXT("Repeated actual F preserves all comment values"), SerializeNodes(*Fixture->Graph) == After);
             Test.TestEqual(TEXT("Comment no-op adds no undo step"), GEditor->Trans->GetQueueLength(), Queue);
             FVector2f CurrentView; float CurrentZoom; Editor->GetViewLocation(CurrentView, CurrentZoom);
@@ -306,11 +315,12 @@ private:
     EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
     FFormatPlan Plan;
     TArray<uint8> Before, After;
+    TMap<FString, FString> Properties;
     FVector2D OriginalCursor;
     FVector2f View;
     float Zoom = 0;
     double Deadline = 0, CaptureAfter = 0;
-    int32 Phase = 0, Frames = 0;
+    int32 Phase = 0, Frames = 0, Queue = 0;
     bool bAmbiguous, bOriginalEnabled = true, bRestore = false, bConnectionsValid = true;
 };
 

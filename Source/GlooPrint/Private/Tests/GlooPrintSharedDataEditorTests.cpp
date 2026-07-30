@@ -78,7 +78,7 @@ public:
         if (Phase == 0)
         {
             Before = SerializeNodes(*Fixture->Graph);
-            const auto Properties = DescribeNodes(*Fixture->Graph);
+            Properties = DescribeNodes(*Fixture->Graph);
             if (!Test.TestTrue(TEXT("Native shared expression gets a complete format plan"),
                 PlanFormatGraph(Fixture->Graph, Scale, {Flow[0][0]->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return Finish(); }
             Test.TestTrue(TEXT("Shared input planning leaves native node/pin values unchanged"), SerializeNodes(*Fixture->Graph) == Before);
@@ -108,10 +108,15 @@ public:
                     Plan.Layout.Positions[SharedIndex].X + SharedGeometry.VisualBounds.Min.X);
             Test.TestEqual(TEXT("Native fixture preserves all eleven connections with custom routes"), Plan.Routes.Wires.Num(), 11);
             Test.TestEqual(TEXT("Shared expression and flow lanes have no native fallback"), Plan.Routes.FallbackCount, 0);
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
             Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F formats native shared expressions"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+            Phase = 2; return false;
+        }
+        if (Phase == 2)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph);
             Test.TestTrue(TEXT("Actual F changes the scattered graph"), After != Before);
             const auto AfterProperties = DescribeNodes(*Fixture->Graph);
@@ -132,6 +137,21 @@ public:
             CheckDebugState(TEXT("Redo"), BS_Dirty);
             Phase = 1; Frames = 0; return false;
         }
+        if (Phase == 3)
+        {
+            Test.TestTrue(TEXT("Repeated F leaves the shared graph exactly unchanged"), SerializeNodes(*Fixture->Graph) == After);
+            Test.TestEqual(TEXT("Shared graph no-op creates no undo entry"), GEditor->Trans->GetQueueLength(), Queue);
+            CheckDebugState(TEXT("Cold plan and repeated F"), BS_Dirty);
+            FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
+            Test.TestEqual(TEXT("Shared layout preserves view"), AfterView, View); Test.TestEqual(TEXT("Shared layout preserves zoom"), AfterZoom, Zoom);
+            TArray<FColor> Pixels; FIntVector Size;
+            if (Test.TestTrue(TEXT("Capture native shared expressions"), Slate.TakeScreenshot(Editor.ToSharedRef(), Pixels, Size)))
+            {
+                TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
+                Test.TestTrue(TEXT("Save native shared expression capture"), FFileHelper::SaveArrayToFile(Png, *(FPaths::ProjectSavedDir() / TEXT("GlooPrint-SharedExpressions.png"))));
+            }
+            return Finish();
+        }
         const auto Cache = Panel->GetMetaData<FRouteCache>();
         if (!Cache || !Cache->IsReady()) { return false; }
         Test.TestEqual(TEXT("Formatting never duplicates the shared node or its input"), Fixture->Graph->Nodes.Num(), 12);
@@ -147,21 +167,10 @@ public:
         {
             Test.TestTrue(TEXT("Native shared-data layout is cold-idempotent"), Cold.Layout.Positions == Plan.Layout.Positions);
         }
-        const int32 Queue = GEditor->Trans->GetQueueLength();
+        Queue = GEditor->Trans->GetQueueLength();
         Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
         Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
-        Test.TestTrue(TEXT("Repeated F leaves the shared graph exactly unchanged"), SerializeNodes(*Fixture->Graph) == After);
-        Test.TestEqual(TEXT("Shared graph no-op creates no undo entry"), GEditor->Trans->GetQueueLength(), Queue);
-        CheckDebugState(TEXT("Cold plan and repeated F"), BS_Dirty);
-        FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
-        Test.TestEqual(TEXT("Shared layout preserves view"), AfterView, View); Test.TestEqual(TEXT("Shared layout preserves zoom"), AfterZoom, Zoom);
-        TArray<FColor> Pixels; FIntVector Size;
-        if (Test.TestTrue(TEXT("Capture native shared expressions"), Slate.TakeScreenshot(Editor.ToSharedRef(), Pixels, Size)))
-        {
-            TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
-            Test.TestTrue(TEXT("Save native shared expression capture"), FFileHelper::SaveArrayToFile(Png, *(FPaths::ProjectSavedDir() / TEXT("GlooPrint-SharedExpressions.png"))));
-        }
-        return Finish();
+        Phase = 3; Frames = 0; return false;
     }
 private:
     bool CompileWithFormatRefusalCheck()
@@ -173,7 +182,7 @@ private:
             bSawCompiler = true;
             Test.TestTrue(TEXT("Native compiler owns the Blueprint busy flag"), Blueprint->bBeingCompiled);
             const auto State = SerializeNodes(*Fixture->Graph);
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            const int32 CompileQueue = GEditor->Trans->GetQueueLength();
             const bool bDirty = Blueprint->GetOutermost()->IsDirty();
             const auto Status = Blueprint->Status;
             auto& Slate = FSlateApplication::Get();
@@ -186,7 +195,7 @@ private:
             Slate.SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F handles refusal during native compilation"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
             Test.TestTrue(TEXT("F during compilation preserves every native node and pin value"), State == SerializeNodes(*Fixture->Graph));
-            Test.TestEqual(TEXT("F during compilation adds no transaction"), GEditor->Trans->GetQueueLength(), Queue);
+            Test.TestEqual(TEXT("F during compilation adds no transaction"), GEditor->Trans->GetQueueLength(), CompileQueue);
             Test.TestEqual(TEXT("F during compilation preserves package dirty state"), Blueprint->GetOutermost()->IsDirty(), bDirty);
             Test.TestEqual(TEXT("F during compilation preserves compiler status"), Blueprint->Status, Status);
             FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
@@ -304,6 +313,7 @@ private:
     EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
     FFormatPlan Plan;
     TArray<uint8> Before, After;
+    TMap<FString, FString> Properties;
     TArray<TWeakObjectPtr<UEdGraphNode>> OriginalNodes;
     TWeakObjectPtr<UClass> OriginalGeneratedClass;
     TEnumAsByte<EBlueprintStatus> OriginalStatus = BS_Unknown;
@@ -312,7 +322,7 @@ private:
     FVector2f View;
     float Zoom = 0;
     double Deadline = 0;
-    int32 Phase = 0, Frames = 0;
+    int32 Phase = 0, Frames = 0, Queue = 0;
     bool bOriginalEnabled = true, bRestore = false, bConnectionsValid = true, bOwnsDebugState = false;
 };
 

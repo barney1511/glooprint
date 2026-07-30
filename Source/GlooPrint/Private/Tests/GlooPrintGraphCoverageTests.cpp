@@ -277,19 +277,20 @@ public:
             }
             OpenTarget(); return false;
         }
+        if (FPlatformTime::Seconds() > Deadline) { Test.AddError(TEXT("Supported graph visibility case did not settle in 60 seconds.")); return Finish(); }
         if (++Frames < 8) { return false; }
         UEdGraph* Graph = Fixture->Targets[Target];
         const float Scale = Window->GetDPIScaleFactor() * Slate.GetApplicationScale();
         FString Reason;
         if (Phase == 0)
         {
-            CheckSelection(TEXT("Before offscreen measurement"));
-            const auto Before = SerializeNodes(*Graph);
+            CheckSelection(TEXT("BeforeMeasurement offscreen measurement"));
+            const auto BeforeMeasurement = SerializeNodes(*Graph);
             if (!Test.TestTrue(Graph->GetName() + TEXT(" measures initially offscreen"), MeasureGraph(Graph, Scale, Measurement, Reason, Options)))
             {
                 Test.AddError(Reason); return Finish();
             }
-            Test.TestTrue(TEXT("Wide native measurement leaves all node and pin data unchanged"), Before == SerializeNodes(*Graph));
+            Test.TestTrue(TEXT("Wide native measurement leaves all node and pin data unchanged"), BeforeMeasurement == SerializeNodes(*Graph));
             {
                 FFormatPlan Plan;
                 if (!Test.TestTrue(TEXT("Initially offscreen pin-mode graph plans formatting"),
@@ -302,7 +303,7 @@ public:
                 {
                     OffscreenPositions.Add(Plan.Snapshot.Nodes[I].Geometry.Id, Plan.Layout.Positions[I]);
                 }
-                Test.TestTrue(TEXT("Offscreen pin-mode planning preserves all original graph values"), Before == SerializeNodes(*Graph));
+                Test.TestTrue(TEXT("Offscreen pin-mode planning preserves all original graph values"), BeforeMeasurement == SerializeNodes(*Graph));
             }
             CheckSelection(TEXT("After offscreen measurement"));
             NodeIndex = 0; PanToNode(); Phase = 1; Frames = 0; return false;
@@ -401,20 +402,24 @@ public:
         }
         if (Phase == 2)
         {
-            TMap<UEdGraph*, TArray<uint8>> BeforeAll;
+            BeforeAll.Reset(); BeforeBytes.Reset(); AfterBytes.Reset();
             for (UEdGraph* Other : Fixture->AllGraphs) { BeforeAll.Add(Other, SerializeNodes(*Other)); }
-            TMap<FGuid, TArray<uint8>> BeforeBytes, AfterBytes;
-            const auto Before = SerializeNodes(*Graph, &BeforeBytes);
-            const auto BeforeValues = SerializeTransactionValues(*Graph);
-            const auto Properties = DescribeNodes(*Graph);
-            const FIntPoint Anchor(Graph->Nodes[0]->NodePosX, Graph->Nodes[0]->NodePosY);
-            const int32 Queue = GEditor->Trans->GetQueueLength();
-            FVector2f View; float Zoom; Editor->GetViewLocation(View, Zoom);
+            Before = SerializeNodes(*Graph, &BeforeBytes);
+            BeforeValues = SerializeTransactionValues(*Graph);
+            Properties = DescribeNodes(*Graph);
+            Anchor = FIntPoint(Graph->Nodes[0]->NodePosX, Graph->Nodes[0]->NodePosY);
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
+            Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
             CheckSelection(TEXT("Immediately before F"));
             Test.TestTrue(TEXT("Actual F handles supported graph"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
-            const auto After = SerializeNodes(*Graph, &AfterBytes);
-            const auto AfterValues = SerializeTransactionValues(*Graph);
+            Phase = 4; return false;
+        }
+        if (Phase == 4)
+        {
+            if (Before == SerializeNodes(*Graph)) { return false; }
+            After = SerializeNodes(*Graph, &AfterBytes);
+            AfterValues = SerializeTransactionValues(*Graph);
             Test.TestEqual(TEXT("Every original planned node remains after F"), Graph->Nodes.Num(), OffscreenPositions.Num());
             for (const UEdGraphNode* Node : Graph->Nodes)
             {
@@ -432,7 +437,7 @@ public:
             CheckSelection(TEXT("Immediately after F"));
             FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
             Test.TestEqual(TEXT("Formatting preserves graph camera"), AfterView, View); Test.TestEqual(TEXT("Formatting preserves graph zoom"), AfterZoom, Zoom);
-            const auto AfterProperties = DescribeNodes(*Graph);
+            AfterProperties = DescribeNodes(*Graph);
             for (const auto& Pair : Properties)
             {
                 if (Pair.Key.EndsWith(TEXT(".NodePosX")) || Pair.Key.EndsWith(TEXT(".NodePosY"))) { continue; }
@@ -444,6 +449,10 @@ public:
                 if (Pair.Key != Graph) { Test.TestTrue(Pair.Key->GetName() + TEXT(" untouched while another graph formats"), Pair.Value == SerializeNodes(*Pair.Key)); }
             }
             Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
+            Phase = 5; Frames = 0; return false;
+        }
+        if (Phase == 5)
+        {
             Test.TestTrue(TEXT("Second F is a cold no-op across graph types"), After == SerializeNodes(*Graph));
             Test.TestEqual(TEXT("Second F adds no transaction"), GEditor->Trans->GetQueueLength(), Queue + 1);
             Test.TestTrue(TEXT("Supported graph undo succeeds"), GEditor->UndoTransaction());
@@ -538,7 +547,7 @@ private:
         Editor->SetNodeSelection(Graph->Nodes[0], true);
         CheckSelection(TEXT("Opening the native graph"));
         Editor->SetViewLocation(FVector2f(100000, 100000), 0.25f);
-        Phase = 0; Frames = 0;
+        Phase = 0; Frames = 0; Deadline = FPlatformTime::Seconds() + 60;
     }
     void PanToNode()
     {
@@ -557,8 +566,15 @@ private:
     FGraphMeasurement Measurement;
     FMeasurementOptions Options;
     TMap<FGuid, FIntPoint> OffscreenPositions;
-    int32 Target = 0, NodeIndex = 0, Phase = 0, Frames = 0, PinMode = 0;
-    double CaptureAfter = 0;
+    TMap<UEdGraph*, TArray<uint8>> BeforeAll;
+    TMap<FGuid, TArray<uint8>> BeforeBytes, AfterBytes;
+    TMap<FString, FString> Properties, AfterProperties;
+    TArray<uint8> Before, BeforeValues, After, AfterValues;
+    FIntPoint Anchor;
+    FVector2f View;
+    float Zoom = 0;
+    int32 Target = 0, NodeIndex = 0, Phase = 0, Frames = 0, PinMode = 0, Queue = 0;
+    double CaptureAfter = 0, Deadline = 0;
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGraphCoverageTest, "GlooPrint.Editor.SupportedGraphsAndNativeNodes",

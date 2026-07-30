@@ -73,13 +73,13 @@ public:
             const auto* Route = Cache->GetRoutes().Wires.Find(Key);
             if (!Test.TestTrue(TEXT("Custom routes work with formatting disabled"), Route && !Route->Curves.IsEmpty())) { return Finish(); }
             RoundedPoints = Route->Points;
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            const int32 DisabledQueue = GEditor->Trans->GetQueueLength();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             FEditor InputProbe;
             Test.TestFalse(TEXT("Disabled formatter yields F to other handlers"), InputProbe.HandleKeyDownEvent(Slate, KeyEvent()));
             Slate.ProcessKeyDownEvent(KeyEvent());
             Test.TestTrue(TEXT("Disabled actual F does not format"), Before == SerializeNodes(*Fixture->Graph));
-            Test.TestEqual(TEXT("Disabled F creates no undo entry"), GEditor->Trans->GetQueueLength(), Queue);
+            Test.TestEqual(TEXT("Disabled F creates no undo entry"), GEditor->Trans->GetQueueLength(), DisabledQueue);
             int32 Changed = -1; FString Reason;
             Test.TestFalse(TEXT("Disabled programmatic command also refuses"), FormatGraph(Fixture->Graph, 1, {}, Changed, Reason));
             Test.TestEqual(TEXT("Disabled command changes no nodes"), Changed, 0);
@@ -140,10 +140,15 @@ public:
             Settings->NotifyChanged();
             Test.TestTrue(TEXT("Editing spacing does not move nodes automatically"), Before == SerializeNodes(*Fixture->Graph));
             CheckPersistence();
-            const int32 Queue = GEditor->Trans->GetQueueLength();
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
             Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("F works while custom styling is off"), Slate.ProcessKeyDownEvent(KeyEvent()));
+            Phase = 8; return false;
+        }
+        if (Phase == 8)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph);
             Test.TestTrue(TEXT("Native-wire F actually formats"), After != Before);
             Test.TestEqual(TEXT("Configured format is one transaction"), GEditor->Trans->GetQueueLength(), Queue + 1);
@@ -153,12 +158,12 @@ public:
             Test.TestTrue(TEXT("Configured format redo succeeds"), GEditor->RedoTransaction());
             Test.TestTrue(TEXT("Configured format redo restores exact result"), SerializeNodes(*Fixture->Graph) == After);
             Slate.ProcessKeyDownEvent(KeyEvent());
-            Test.TestTrue(TEXT("Repeated format with settings is a cold no-op"), SerializeNodes(*Fixture->Graph) == After);
-            Test.TestEqual(TEXT("Configured no-op creates no transaction"), GEditor->Trans->GetQueueLength(), Queue + 1);
-            return Advance();
+            Phase = 5; Frames = 0; return false;
         }
         if (Phase == 5)
         {
+            Test.TestTrue(TEXT("Repeated format with settings is a cold no-op"), SerializeNodes(*Fixture->Graph) == After);
+            Test.TestEqual(TEXT("Configured no-op creates no transaction"), GEditor->Trans->GetQueueLength(), Queue + 1);
             FVector2f CurrentView; float CurrentZoom;
             Editor->GetViewLocation(CurrentView, CurrentZoom);
             Test.TestEqual(TEXT("Configured formatting preserves camera"), CurrentView, View);
@@ -300,7 +305,7 @@ private:
     FVector2f Mouse, View;
     float Zoom = 0;
     double Deadline = 0;
-    int32 Frames = 0, Phase = 0, Builds = 0;
+    int32 Frames = 0, Phase = 0, Builds = 0, Queue = 0;
     bool bOriginalEnabled = true, bRestore = false;
 };
 

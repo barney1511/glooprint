@@ -117,19 +117,29 @@ public:
             Test.TestEqual(TEXT("Retired cache remains stopped after module reload"), HeldRoutes->GetBuildCount(), OldBuilds);
             Test.TestFalse(TEXT("Reload does not revive pending measurement work"), Panel->GetMetaData<FMeasurementCache>().IsValid());
             Capture(TEXT("GlooPrint-ModuleReloaded.png"));
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Reloaded module handles actual F"), PressF());
+            Phase = 5; return false;
+        }
+        if (Phase == 5)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph);
             Test.TestTrue(TEXT("Only the new explicit F formats the graph"), After != Before);
             Test.TestEqual(TEXT("Reloaded F creates exactly one transaction"), GEditor->Trans->GetQueueLength(), Queue + 1);
             Test.TestTrue(TEXT("Reloaded format marks the owned package dirty"), Package->IsDirty());
             Phase = 3; Frames = 0; return false;
         }
-        Test.TestTrue(TEXT("Reloaded format undo succeeds"), GEditor->UndoTransaction());
-        Test.TestTrue(TEXT("Reloaded undo restores all original node and pin values"), Before == SerializeNodes(*Fixture->Graph));
-        Test.TestTrue(TEXT("Reloaded format redo succeeds"), GEditor->RedoTransaction());
-        Test.TestTrue(TEXT("Reloaded redo restores all formatted values"), After == SerializeNodes(*Fixture->Graph));
-        Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly); PressF();
+        if (Phase == 3)
+        {
+            Test.TestTrue(TEXT("Reloaded format undo succeeds"), GEditor->UndoTransaction());
+            Test.TestTrue(TEXT("Reloaded undo restores all original node and pin values"), Before == SerializeNodes(*Fixture->Graph));
+            Test.TestTrue(TEXT("Reloaded format redo succeeds"), GEditor->RedoTransaction());
+            Test.TestTrue(TEXT("Reloaded redo restores all formatted values"), After == SerializeNodes(*Fixture->Graph));
+            Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly); PressF();
+            Phase = 6; Frames = 0; return false;
+        }
         Test.TestTrue(TEXT("Reloaded second F is a no-op"), After == SerializeNodes(*Fixture->Graph));
         Test.TestEqual(TEXT("Reloaded no-op adds no extra transaction"), GEditor->Trans->GetQueueLength(), Queue + 1);
         ClosedMeasurement = Panel->GetMetaData<FMeasurementCache>(); ClosedRoutes = Panel->GetMetaData<FRouteCache>();

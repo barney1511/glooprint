@@ -94,6 +94,8 @@ public:
         auto* Panel = Editor->GetGraphPanel();
         if (Phase == 3)
         {
+            Test.TestTrue(TEXT("Repeated F leaves packed graph unchanged"), After == SerializeNodes(*Fixture->Graph));
+            Test.TestEqual(TEXT("Repeated F creates no extra undo entry"), GEditor->Trans->GetQueueLength(), Queue);
             const auto InnerWidget = Panel->GetNodeWidgetFromGuid(Inner->NodeGuid);
             const auto OuterWidget = Panel->GetNodeWidgetFromGuid(Outer->NodeGuid);
             if (Test.TestTrue(TEXT("Nested comments have normal-detail native widgets"), InnerWidget && OuterWidget))
@@ -116,18 +118,23 @@ public:
                 Editor->ClearSelectionSet(); Editor->SetNodeSelection(Entry, true);
                 bPreparedSelection = true; Frames = 0; return false;
             }
-            const auto Before = SerializeNodes(*Fixture->Graph);
-            const auto BeforeValues = SerializeTransactionValues(*Fixture->Graph);
-            const auto Properties = DescribeNodes(*Fixture->Graph);
+            Before = SerializeNodes(*Fixture->Graph);
+            BeforeValues = SerializeTransactionValues(*Fixture->Graph);
+            Properties = DescribeNodes(*Fixture->Graph);
             if (!Test.TestTrue(TEXT("Disconnected groups plan with comments and feedback wires"),
                 PlanFormatGraph(Fixture->Graph, Scale, {Entry->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return true; }
             Test.TestTrue(TEXT("Packing plan leaves graph bytes unchanged"), Before == SerializeNodes(*Fixture->Graph));
             Test.TestEqual(TEXT("Every original execution and feedback edge is retained"), Plan.Routes.Wires.Num(), 6);
             Test.TestEqual(TEXT("Packed groups need no native routing fallback"), Plan.Routes.FallbackCount, 0);
-            const int32 Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
-            FVector2f View; float Zoom; Editor->GetViewLocation(View, Zoom);
+            Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
+            Editor->GetViewLocation(View, Zoom);
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("Actual F packs the entire graph"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+            Phase = 4; return false;
+        }
+        if (Phase == 4)
+        {
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             Test.TestTrue(TEXT("Packing changes the original layout"), Before != SerializeNodes(*Fixture->Graph));
             Test.TestEqual(TEXT("Packing has exactly one native undo step"), GEditor->Trans->GetQueueLength(), Queue + 1);
             After = SerializeNodes(*Fixture->Graph);
@@ -210,10 +217,8 @@ public:
                 Inner->GetNodesUnderComment().Contains(Groups[4][I]) && Outer->GetNodesUnderComment().Contains(Groups[4][I]));
         }
         Test.TestTrue(TEXT("Outer comment retains the original inner comment"), Outer->GetNodesUnderComment().Contains(Inner));
-        const int32 Queue = GEditor->Trans->GetQueueLength();
+        Queue = GEditor->Trans->GetQueueLength();
         Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
-        Test.TestTrue(TEXT("Repeated F leaves packed graph unchanged"), After == SerializeNodes(*Fixture->Graph));
-        Test.TestEqual(TEXT("Repeated F creates no extra undo entry"), GEditor->Trans->GetQueueLength(), Queue);
         Capture(TEXT("GlooPrint-IslandPacking.png"));
         FBox2f All(ForceInit); for (const auto& Box : Bounds) { All += Box.Min; All += Box.Max; }
         Test.AddInfo(FString::Printf(TEXT("Native packed visual/wire envelope: %.0f x %.0f graph units, %d repairs, %d fallbacks."),
@@ -258,9 +263,12 @@ private:
     FLayoutSettings OriginalSettings;
     EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
     FFormatPlan Plan;
-    TArray<uint8> After;
+    TArray<uint8> Before, BeforeValues, After;
+    TMap<FString, FString> Properties;
+    FVector2f View;
+    float Zoom = 0;
     bool bOriginalEnabled = true, bRestore = false, bConnectionsValid = true, bPreparedSelection = false;
-    int32 Frames = 0, Phase = 0;
+    int32 Frames = 0, Phase = 0, Queue = 0;
     double Deadline = 0;
 };
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FIslandPackingEditorTest, "GlooPrint.Editor.DisconnectedGroupPacking",

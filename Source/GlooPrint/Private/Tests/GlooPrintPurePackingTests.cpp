@@ -101,17 +101,22 @@ public:
         FString Reason;
         if (!bFormatted)
         {
-            const auto Before = SerializeNodes(*Fixture->Graph);
-            const auto BeforeValues = SerializeTransactionValues(*Fixture->Graph);
-            const auto Properties = DescribeNodes(*Fixture->Graph);
-            if (!Test.TestTrue(TEXT("Native pure input packing plan computes"), PlanFormatGraph(Fixture->Graph, Scale, {Flow[0][0]->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return true; }
-            Test.TestTrue(TEXT("Packing plan is read-only"), Before == SerializeNodes(*Fixture->Graph));
-            Test.TestEqual(TEXT("Packing keeps all original links"), Plan.Routes.Wires.Num(), bGroup ? 13 : 11);
-            Test.TestEqual(TEXT("Packing needs no native fallback"), Plan.Routes.FallbackCount, 0);
-            const int32 Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
-            Editor->GetViewLocation(View, Zoom);
-            Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
-            Test.TestTrue(TEXT("Actual F packs pure inputs"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+            if (!bRequested)
+            {
+                Before = SerializeNodes(*Fixture->Graph);
+                BeforeValues = SerializeTransactionValues(*Fixture->Graph);
+                Properties = DescribeNodes(*Fixture->Graph);
+                if (!Test.TestTrue(TEXT("Native pure input packing plan computes"), PlanFormatGraph(Fixture->Graph, Scale, {Flow[0][0]->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return true; }
+                Test.TestTrue(TEXT("Packing plan is read-only"), Before == SerializeNodes(*Fixture->Graph));
+                Test.TestEqual(TEXT("Packing keeps all original links"), Plan.Routes.Wires.Num(), bGroup ? 13 : 11);
+                Test.TestEqual(TEXT("Packing needs no native fallback"), Plan.Routes.FallbackCount, 0);
+                Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
+                Editor->GetViewLocation(View, Zoom);
+                Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
+                Test.TestTrue(TEXT("Actual F packs pure inputs"), Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0)));
+                bRequested = true; return false;
+            }
+            if (Before == SerializeNodes(*Fixture->Graph)) { return false; }
             After = SerializeNodes(*Fixture->Graph);
             const auto AfterValues = SerializeTransactionValues(*Fixture->Graph);
             Test.TestTrue(TEXT("Packing changes the scattered native layout"), After != Before);
@@ -132,6 +137,12 @@ public:
             Test.TestTrue(TEXT("Pure input packing redo succeeds"), GEditor->RedoTransaction());
             Test.TestTrue(TEXT("Redo restores every serialized value"), AfterValues == SerializeTransactionValues(*Fixture->Graph));
             bFormatted = true; Frames = 0; return false;
+        }
+        if (bNoOpRequested)
+        {
+            Test.TestTrue(TEXT("Repeated F leaves native input graph unchanged"), After == SerializeNodes(*Fixture->Graph));
+            Test.TestEqual(TEXT("Repeated F creates no transaction"), GEditor->Trans->GetQueueLength(), Queue);
+            return true;
         }
         const auto Cache = Panel->GetMetaData<FRouteCache>();
         if (!Cache || !Cache->IsReady()) { return false; }
@@ -194,11 +205,9 @@ public:
         for (const auto& Pair : Plan.Routes.Wires) { All += Pair.Value.Bounds.Min; All += Pair.Value.Bounds.Max; }
         Test.TestEqual(TEXT("Shared producer still has its two original consumers"), Shared->FindPinChecked(UEdGraphSchema_K2::PN_ReturnValue)->LinkedTo.Num(), 2);
         Test.TestEqual(TEXT("Native node count is unchanged"), Fixture->Graph->Nodes.Num(), bGroup ? 14 : 12);
-        const int32 Queue = GEditor->Trans->GetQueueLength();
+        Queue = GEditor->Trans->GetQueueLength();
         Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
         Slate.ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, false, 0, 0));
-        Test.TestTrue(TEXT("Repeated F leaves native input graph unchanged"), After == SerializeNodes(*Fixture->Graph));
-        Test.TestEqual(TEXT("Repeated F creates no transaction"), GEditor->Trans->GetQueueLength(), Queue);
         FVector2f AfterView; float AfterZoom; Editor->GetViewLocation(AfterView, AfterZoom);
         Test.TestTrue(TEXT("Packing preserves camera and zoom"), View == AfterView && Zoom == AfterZoom);
         TArray<FColor> Pixels; FIntVector Size;
@@ -212,7 +221,7 @@ public:
         }
         Test.AddInfo(FString::Printf(TEXT("Pure input visual/wire envelope %.0f x %.0f; shared Y%d; %d repairs, %d fallbacks."),
             All.Max.X - All.Min.X, All.Max.Y - All.Min.Y, Shared->NodePosY, Plan.SpacingRepairs, Plan.Routes.FallbackCount));
-        return true;
+        bNoOpRequested = true; Frames = 0; return false;
     }
 private:
     UK2Node_CallFunction* Call(UClass* Library, FName Name, FVector2f Position)
@@ -236,11 +245,13 @@ private:
     TSharedPtr<SGraphEditor> Editor;
     TSharedPtr<SWindow> Window;
     FFormatPlan Plan;
-    TArray<uint8> After;
+    TArray<uint8> Before, BeforeValues, After;
+    TMap<FString, FString> Properties;
     FVector2f View;
     float Zoom = 0;
     double Deadline = 0;
-    int32 Frames = 0;
+    int32 Frames = 0, Queue = 0;
+    bool bRequested = false, bNoOpRequested = false;
     bool bRestore = false, bOriginalEnabled = true, bLinksValid = true, bFormatted = false;
 };
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPurePackingRoundedTest, "GlooPrint.Editor.PureInputGapPacking.Rounded",
