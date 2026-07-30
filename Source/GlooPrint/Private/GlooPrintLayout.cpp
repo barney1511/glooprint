@@ -24,6 +24,72 @@ bool Intersects(const FMeasuredRect& A, const FMeasuredRect& B)
     return A.Min.X < B.Max.X && A.Max.X > B.Min.X && A.Min.Y < B.Max.Y && A.Max.Y > B.Min.Y;
 }
 
+bool HasBodyOverlap(const FLayoutGraph& Graph, const TArray<int32>& UnitOf, const TArray<FMeasuredRect>& Bodies)
+{
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_ValidateLayoutBodies);
+    struct FProjection
+    {
+        TArray<int32> Starts, Ends;
+        uint64 Pairs = 0;
+    };
+    const auto Coordinate = [&Bodies](int32 Node, bool bX, bool bEnd)
+    {
+        const FVector2f& Point = bEnd ? Bodies[Node].Max : Bodies[Node].Min;
+        return bX ? Point.X : Point.Y;
+    };
+    const auto Project = [&Graph, &Bodies, &Coordinate](bool bX)
+    {
+        FProjection Result;
+        Result.Starts.Reserve(Bodies.Num());
+        for (int32 I = 0; I < Bodies.Num(); ++I) { if (!Graph.Nodes[I].bComment) { Result.Starts.Add(I); } }
+        Result.Ends = Result.Starts;
+        Result.Starts.Sort([&](int32 A, int32 B)
+        {
+            const float From = Coordinate(A, bX, false), To = Coordinate(B, bX, false);
+            return From != To ? From < To : A < B;
+        });
+        Result.Ends.Sort([&](int32 A, int32 B)
+        {
+            const float From = Coordinate(A, bX, true), To = Coordinate(B, bX, true);
+            return From != To ? From < To : A < B;
+        });
+        int32 End = 0;
+        for (int32 Start = 0; Start < Result.Starts.Num(); ++Start)
+        {
+            const float Min = Coordinate(Result.Starts[Start], bX, false);
+            while (End < Result.Ends.Num() && Coordinate(Result.Ends[End], bX, true) < Min) { ++End; }
+            Result.Pairs += uint64(Start - End);
+        }
+        return Result;
+    };
+    FProjection Sweep = Project(true);
+    if (Sweep.Pairs == 0) { return false; }
+    FProjection Vertical = Project(false);
+    if (Vertical.Pairs == 0) { return false; }
+    const bool bX = Sweep.Pairs <= Vertical.Pairs;
+    if (!bX) { Sweep = MoveTemp(Vertical); }
+    TArray<int32> Active, Slots;
+    Active.Reserve(Sweep.Starts.Num()); Slots.Init(INDEX_NONE, Bodies.Num());
+    int32 End = 0;
+    for (const int32 I : Sweep.Starts)
+    {
+        const float Min = Coordinate(I, bX, false);
+        while (End < Sweep.Ends.Num() && Coordinate(Sweep.Ends[End], bX, true) < Min)
+        {
+            const int32 Expired = Sweep.Ends[End++], Slot = Slots[Expired];
+            const int32 Last = Active.Pop(EAllowShrinking::No);
+            if (Slot < Active.Num()) { Active[Slot] = Last; Slots[Last] = Slot; }
+            Slots[Expired] = INDEX_NONE;
+        }
+        for (const int32 J : Active)
+        {
+            if (UnitOf[I] != UnitOf[J] && Intersects(Bodies[I], Bodies[J])) { return true; }
+        }
+        Slots[I] = Active.Add(I);
+    }
+    return false;
+}
+
 FMeasuredRect Union(const FMeasuredRect& A, const FMeasuredRect& B)
 {
     return {FVector2f(FMath::Min(A.Min.X, B.Min.X), FMath::Min(A.Min.Y, B.Min.Y)),
@@ -967,14 +1033,11 @@ static bool ComputeLayoutCandidate(const FLayoutGraph& Graph, const FLayoutSetti
         const FVector2f Position(float(Result.Positions[I].X), float(Result.Positions[I].Y));
         const FVector2f Size = Graph.Nodes[I].bComment ? FVector2f(float(Result.Sizes[I].X), float(Result.Sizes[I].Y)) : Graph.Nodes[I].Geometry.BodySize;
         NewBodies.Add({Position, Position + Size});
-        for (int32 J = 0; J < I; ++J)
-        {
-            if (!Graph.Nodes[I].bComment && !Graph.Nodes[J].bComment && UnitOf[I] != UnitOf[J] && Intersects(NewBodies[I], NewBodies[J]))
-            {
-                if (OutFailure) { *OutFailure = ELayoutFailure::Constraints; }
-                OutReason = TEXT("The proposed layout contains overlapping nodes."); return false;
-            }
-        }
+    }
+    if (HasBodyOverlap(Graph, UnitOf, NewBodies))
+    {
+        if (OutFailure) { *OutFailure = ELayoutFailure::Constraints; }
+        OutReason = TEXT("The proposed layout contains overlapping nodes."); return false;
     }
     for (const int32 C : Comments)
     {

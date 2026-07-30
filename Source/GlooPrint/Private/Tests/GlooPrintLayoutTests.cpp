@@ -110,6 +110,39 @@ bool FLayoutFlowTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBodyOverlapLayoutTest, "GlooPrint.Layout.BodyOverlapValidation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FBodyOverlapLayoutTest::RunTest(const FString& Parameters)
+{
+    FLayoutGraph Graph;
+    for (int32 I = 0; I < 3; ++I)
+    {
+        AddNode(Graph, {I * 400, I * 400}, {180, 400});
+        Graph.Nodes[I].Geometry.VisualBounds.Max.Y = 1;
+    }
+    Link(Graph, 0, 1); Link(Graph, 0, 2, ELinkKind::Execution, 2); Graph.Anchor = 0;
+    FLayoutResult Result; FString Reason; ELayoutFailure Failure;
+    TestFalse(TEXT("Overlapping proposed bodies are rejected"), ComputeLayout(Graph, {}, Result, Reason, &Failure));
+    TestEqual(TEXT("Overlap is a constraint failure"), Failure, ELayoutFailure::Constraints);
+    TestTrue(TEXT("The final body guard identifies the overlap"), Reason.Contains(TEXT("overlapping nodes")));
+    TestTrue(TEXT("Overlap returns no partial placement"), Result.Positions.IsEmpty());
+    for (const int32 Shift : {-10000000, 10000000})
+    {
+        FLayoutGraph Tiny;
+        for (int32 I = 0; I < 3; ++I) { AddNode(Tiny, {Shift, Shift}, {0.25f, 0.25f}, 0.125f, 0.125f); }
+        Link(Tiny, 0, 1); Link(Tiny, 0, 2, ELinkKind::Execution, 2); Tiny.Anchor = 0;
+        if (TestTrue(TEXT("Rounded zero-extent bodies remain valid near coordinate limits"), ComputeLayout(Tiny, {}, Result, Reason)))
+        {
+            const float X = float(Result.Positions[0].X);
+            TestEqual(TEXT("Fixture exercises collapsed float body endpoints"), X + Tiny.Nodes[0].Geometry.BodySize.X, X);
+            TestEqual(TEXT("Tiny-body anchor stays exact"), Result.Positions[0], Tiny.Nodes[0].Geometry.Position);
+            CheckColdIdempotence(*this, Tiny, Result);
+        }
+        else { AddError(Reason); }
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLayoutContinuationTest, "GlooPrint.Layout.ContinuationOwnership",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FLayoutContinuationTest::RunTest(const FString& Parameters)
