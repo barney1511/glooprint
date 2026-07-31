@@ -134,6 +134,7 @@ bool ApplyLayout(UEdGraph* Graph, const FLayoutGraph& Snapshot, const FLayoutRes
     if (!ExpectedLinks.IsEmpty()) { OutReason = TEXT("Connections changed before application."); return false; }
     if (Changed.IsEmpty()) { return true; }
     {
+        TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_ApplyTransaction);
         const FScopedTransaction Transaction(LOCTEXT("FormatTransaction", "Format Blueprint Graph"));
         for (const int32 I : Changed)
         {
@@ -470,6 +471,7 @@ void FEditor::ShowProgress()
 
 void FEditor::ExecutePanel(TWeakPtr<SGraphPanel> WeakPanel)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_FormatDispatch);
     auto& Slate = FSlateApplication::Get();
     if (Pending && Pending->Panel == WeakPanel && IsPendingCurrent(*Pending, Slate)) { return; }
     CancelPending();
@@ -516,6 +518,7 @@ void FEditor::ExecutePanel(TWeakPtr<SGraphPanel> WeakPanel)
 
 void FEditor::ContinueRequest(FPendingFormat Request, double Deadline)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_FormatContinuation);
     auto& Slate = FSlateApplication::Get();
     FString Reason;
     bool bSuccess = false, bFinished = true, bNeedsRetry = false;
@@ -611,6 +614,7 @@ bool FEditor::IsPendingCurrent(const FPendingFormat& Request, FSlateApplication&
 void FEditor::Tick(float DeltaTime, FSlateApplication& SlateApp, TSharedRef<ICursor> Cursor)
 {
     if (!Pending || Pending->LastAttemptFrame == GFrameCounter) { return; }
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_FormatPendingTick);
     FPendingFormat Request = MoveTemp(Pending.GetValue()); Pending.Reset();
     if (!IsPendingCurrent(Request, SlateApp, false)) { CloseProgress(); return; }
     ContinueRequest(MoveTemp(Request), FPlatformTime::Seconds() + 0.004);
