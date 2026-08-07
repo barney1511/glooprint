@@ -320,6 +320,7 @@ bool MeasureNode(UEdGraphNode& Node, float LayoutScale, FMeasuredNode& Out, FStr
 
 bool ValidateMeasurementGraph(UEdGraph* Graph, FString& OutReason)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_ValidateMeasurementGraph);
     OutReason.Reset();
     if (!IsInGameThread() || !FSlateApplication::IsInitialized())
     {
@@ -338,35 +339,42 @@ bool ValidateMeasurementGraph(UEdGraph* Graph, FString& OutReason)
         return false;
     }
 
-    TSet<FGuid> NodeIds;
-    TSet<const UEdGraphPin*> Pins;
+    TSet<FGuid> NodeIds, PinIds;
+    NodeIds.Reserve(Graph->Nodes.Num());
+    TSet<const UEdGraphPin*> ReferencedPins;
     for (UEdGraphNode* Node : Graph->Nodes)
     {
-        if (!IsValid(Node) || Node->GetGraph() != Graph || !Node->NodeGuid.IsValid() || NodeIds.Contains(Node->NodeGuid))
+        if (!IsValid(Node) || Node->GetGraph() != Graph || !Node->NodeGuid.IsValid())
         {
             OutReason = TEXT("The graph has missing, reconstructed, or ambiguous node identities.");
             return false;
         }
-        NodeIds.Add(Node->NodeGuid);
-        TSet<FGuid> PinIds;
+        bool bDuplicate = false;
+        NodeIds.Add(Node->NodeGuid, &bDuplicate);
+        if (bDuplicate) { OutReason = TEXT("The graph has missing, reconstructed, or ambiguous node identities."); return false; }
+        PinIds.Reset(); PinIds.Reserve(Node->Pins.Num());
         for (const UEdGraphPin* Pin : Node->Pins)
         {
             if (!Pin || Pin->bWasTrashed || Pin->GetOwningNodeUnchecked() != Node || !Pin->PinId.IsValid() ||
-                PinIds.Contains(Pin->PinId) || (Pin->Direction != EGPD_Input && Pin->Direction != EGPD_Output))
+                (Pin->Direction != EGPD_Input && Pin->Direction != EGPD_Output))
             {
                 OutReason = TEXT("A node contains invalid pin identities."); return false;
             }
-            PinIds.Add(Pin->PinId); Pins.Add(Pin);
+            PinIds.Add(Pin->PinId, &bDuplicate);
+            if (bDuplicate) { OutReason = TEXT("A node contains invalid pin identities."); return false; }
+            for (const UEdGraphPin* Link : Pin->LinkedTo) { ReferencedPins.Add(Link); }
         }
     }
-    for (const UEdGraphPin* Pin : Pins)
+    if (ReferencedPins.IsEmpty()) { return true; }
+    for (const UEdGraphNode* Node : Graph->Nodes)
     {
-        for (const UEdGraphPin* Link : Pin->LinkedTo)
+        for (const UEdGraphPin* Pin : Node->Pins)
         {
-            if (!Pins.Contains(Link)) { OutReason = TEXT("A connection has a missing or external endpoint."); return false; }
+            ReferencedPins.Remove(Pin);
+            if (ReferencedPins.IsEmpty()) { return true; }
         }
     }
-    return true;
+    OutReason = TEXT("A connection has a missing or external endpoint."); return false;
 }
 
 struct FMeasurementJob::FState

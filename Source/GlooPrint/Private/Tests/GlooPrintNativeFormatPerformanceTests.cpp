@@ -23,6 +23,26 @@ namespace GlooPrint::Tests
 {
 namespace
 {
+bool PopulateNativeChain(FAutomationTestBase& Test, FFixture& Fixture, int32 Count, int32 Outputs,
+    UK2Node_ExecutionSequence*& Entry, int32& Pins)
+{
+    UK2Node_ExecutionSequence* Previous = nullptr;
+    for (int32 I = 0; I < Count; ++I)
+    {
+        auto* Node = Fixture.Add<UK2Node_ExecutionSequence>({float(((I * 7) % 10) * 512), float((I / 10) * (Outputs * 32 + 160))});
+        Node->NodeGuid = FGuid(0, 0, 0, I + 1);
+        for (int32 P = 2; P < Outputs; ++P) { Node->AddInputPin(); }
+        if (Previous && !Fixture.Graph->GetSchema()->TryCreateConnection(Previous->GetThenPinGivenIndex(0), Node->FindPinChecked(UEdGraphSchema_K2::PN_Execute)))
+        {
+            Test.AddError(TEXT("Native schema refused the benchmark chain.")); return false;
+        }
+        if (!Entry) { Entry = Node; }
+        for (UEdGraphPin* Pin : Node->Pins) { FString Tooltip; Node->GetPinHoverText(*Pin, Tooltip); }
+        Pins += Node->Pins.Num(); Previous = Node;
+    }
+    return true;
+}
+
 class FFormatCompletion final : public FOutputDevice
 {
 public:
@@ -35,6 +55,7 @@ public:
         if (FCString::Strncmp(Message, Prefix, UE_ARRAY_COUNT(Prefix) - 1) != 0) { LastMessage = Message; return; }
         CompletedAt = FPlatformTime::Seconds(); CompletedFrame = GFrameCounter;
         if (const auto Cache = Measurements.Pin()) { Hits = Cache->GetHits(); Misses = Cache->GetMisses(); }
+        if (const auto Owner = GraphEditor.Pin()) { Owner->GetViewLocation(View, Zoom); }
         Changed = FCString::Atoi(Message + UE_ARRAY_COUNT(Prefix) - 1); bArmed = false;
         TRACE_BOOKMARK(TEXT("GlooPrintNativeF complete %s changed=%d"), *Label, Changed);
     }
@@ -45,6 +66,9 @@ public:
     }
     FString Label, LastMessage;
     TWeakPtr<FMeasurementCache> Measurements;
+    TWeakPtr<SGraphEditor> GraphEditor;
+    FVector2f View;
+    float Zoom = 0;
     double CompletedAt = 0;
     uint64 CompletedFrame = 0;
     int32 Changed = -1, Hits = -1, Misses = -1;
@@ -142,25 +166,12 @@ private:
         Directory = FPaths::ProjectSavedDir() / TEXT("GlooPrintBenchmarks"); IFileManager::Get().MakeDirectory(*Directory, true);
         Package.Reset(CreatePackage(*FString::Printf(TEXT("/Temp/GlooPrintNativeF_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
         Fixture = MakeUnique<FFixture>(UObject::StaticClass(), false, Package.Get());
-        UK2Node_ExecutionSequence* Previous = nullptr;
-        const int32 Outputs = Family == TEXT("PinHeavy") ? 64 : 2;
-        for (int32 I = 0; I < Count; ++I)
-        {
-            auto* Node = Fixture->Add<UK2Node_ExecutionSequence>({float(((I * 7) % 10) * 512), float((I / 10) * (Outputs * 32 + 160))});
-            Node->NodeGuid = FGuid(0, 0, 0, I + 1);
-            for (int32 P = 2; P < Outputs; ++P) { Node->AddInputPin(); }
-            if (Previous && !Fixture->Graph->GetSchema()->TryCreateConnection(Previous->GetThenPinGivenIndex(0), Node->FindPinChecked(UEdGraphSchema_K2::PN_Execute)))
-            {
-                Test.AddError(TEXT("Native schema refused the benchmark chain.")); return Finish();
-            }
-            if (!Entry) { Entry = Node; }
-            for (UEdGraphPin* Pin : Node->Pins) { FString Tooltip; Node->GetPinHoverText(*Pin, Tooltip); }
-            Pins += Node->Pins.Num(); Previous = Node;
-        }
+        if (!PopulateNativeChain(Test, *Fixture, Count, Family == TEXT("PinHeavy") ? 64 : 2, Entry, Pins)) { return Finish(); }
         Editor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(true);
         Window = SNew(SWindow).Title(FText::FromString(FString::Printf(TEXT("GlooPrint native F: %d %s"), Count, *Family)))
             .ClientSize(FVector2f(1450, 1000))[Editor.ToSharedRef()];
         Slate.AddWindow(Window.ToSharedRef()); Editor->SetNodeSelection(Entry, true); Editor->ZoomToFit(false); Slate.SetCursorPos(FVector2D::ZeroVector);
+        Completion.GraphEditor = Editor;
         GLog->AddOutputDevice(&Completion); bListening = true; Deadline = FPlatformTime::Seconds() + 180; return false;
     }
     void BeginRequest(bool bRepeat)
@@ -170,6 +181,9 @@ private:
         if (!bRepeat && !bKeepMeasurementCache) { Test.TestEqual(TEXT("Measured format begins with cold native measurement cache"), CacheEntriesBefore, 0); }
         Package->SetDirtyFlag(false); FSlateApplication::Get().SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
         Completion.Arm(FString::Printf(TEXT("%d.%s.%d.%s"), Count, *Family, Sample, bRepeat ? TEXT("Repeat") : TEXT("Format")), Cache);
+        Editor->GetViewLocation(RequestView, RequestZoom);
+        Test.TestTrue(*FString::Printf(TEXT("%s begins at the original camera: initial=(%.9g,%.9g) zoom=%.9g, before F=(%.9g,%.9g) zoom=%.9g"),
+            *Completion.Label, View.X, View.Y, Zoom, RequestView.X, RequestView.Y, RequestZoom), RequestView == View && RequestZoom == Zoom);
         TRACE_BOOKMARK(TEXT("GlooPrintNativeF start %s cache=%d"), *Completion.Label, CacheEntriesBefore);
         StartedFrame = GFrameCounter; StartedAt = FPlatformTime::Seconds();
         bool bHandled = false;
@@ -187,7 +201,10 @@ private:
         Test.TestEqual(TEXT("Whole F keeps its selected anchor fixed"), FIntPoint(Entry->NodePosX, Entry->NodePosY), Anchor);
         Test.TestTrue(TEXT("Whole F retains the original selection"), Editor->GetSelectedNodes().Num() == 1 && Editor->GetSelectedNodes().Contains(Entry));
         FVector2f CurrentView; float CurrentZoom = 0; Editor->GetViewLocation(CurrentView, CurrentZoom);
-        Test.TestTrue(TEXT("Whole F retains camera position and zoom"), CurrentView == View && CurrentZoom == Zoom);
+        Test.TestTrue(*FString::Printf(TEXT("Whole F retains camera position and zoom (%s): initial=(%.9g,%.9g) zoom=%.9g, before F=(%.9g,%.9g) zoom=%.9g, command result=(%.9g,%.9g) zoom=%.9g, routes ready=(%.9g,%.9g) zoom=%.9g"),
+            *Completion.Label, View.X, View.Y, Zoom, RequestView.X, RequestView.Y, RequestZoom,
+            Completion.View.X, Completion.View.Y, Completion.Zoom, CurrentView.X, CurrentView.Y, CurrentZoom),
+            CurrentView == View && CurrentZoom == Zoom && Completion.View == RequestView && Completion.Zoom == RequestZoom);
     }
     void CheckProperties()
     {
@@ -258,9 +275,9 @@ private:
     TMap<FString, FString> Properties;
     TArray<double> FormatTimes, RepeatTimes;
     FVector2D OriginalCursor;
-    FVector2f View;
+    FVector2f View, RequestView;
     FIntPoint Anchor;
-    float Zoom = 0;
+    float Zoom = 0, RequestZoom = 0;
     double Deadline = 0, StartedAt = 0, DispatchEndedAt = 0, DispatchMs = 0;
     uint64 StartedFrame = 0;
     int32 Phase = 0, Frames = 0, Sample = -1, SamplesWanted = 3, Pins = 0, AppliedQueue = 0, NoOpQueue = 0, NoOpUndo = 0, CacheEntriesBefore = 0;
@@ -282,5 +299,35 @@ bool FNativeFormatPerformanceTest::RunTest(const FString& Parameters)
     if (!Parameters.Split(TEXT("."), &Size, &Family)) { AddError(TEXT("Expected native fixture size and family.")); return false; }
     ADD_LATENT_AUTOMATION_COMMAND(FNativeFormatBenchmark(*this, FCString::Atoi(*Size), Family)); return true;
 }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNativeValidationPerformanceTest, "GlooPrint.Performance.NativeValidation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::PerfFilter)
+bool FNativeValidationPerformanceTest::RunTest(const FString& Parameters)
+{
+    FFixture Fixture(UObject::StaticClass(), false);
+    UK2Node_ExecutionSequence* Entry = nullptr;
+    int32 Pins = 0;
+    if (!PopulateNativeChain(*this, Fixture, 1000, 64, Entry, Pins)) { return false; }
+    const auto Before = SerializeNodes(*Fixture.Graph);
+    TArray<double> Times; Times.Reserve(30);
+    FString Csv = TEXT("nodes,pins,sample,validation_ms\n"), Reason;
+    for (int32 Sample = -3; Sample < 30; ++Sample)
+    {
+        const double Start = FPlatformTime::Seconds();
+        const bool bValid = ValidateMeasurementGraph(Fixture.Graph, Reason);
+        const double Ms = (FPlatformTime::Seconds() - Start) * 1000;
+        if (!TestTrue(*Reason, bValid)) { return false; }
+        Csv += FString::Printf(TEXT("1000,%d,%d,%.6f\n"), Pins, Sample, Ms);
+        if (Sample >= 0) { Times.Add(Ms); }
+    }
+    TestTrue(TEXT("Repeated validation preserves every native node and pin value"), Before == SerializeNodes(*Fixture.Graph));
+    Times.Sort();
+    AddInfo(FString::Printf(TEXT("Native validation only, 1000 nodes/%d pins: 30 samples after 3 warmups, median %.3fms, p95 %.3fms, range %.3f–%.3fms. No F or responsiveness claim."),
+        Pins, (Times[14] + Times[15]) * 0.5, Times[28], Times[0], Times.Last()));
+    const FString Directory = FPaths::ProjectSavedDir() / TEXT("GlooPrintBenchmarks");
+    IFileManager::Get().MakeDirectory(*Directory, true);
+    TestTrue(TEXT("Save native validation samples"), FFileHelper::SaveStringToFile(Csv, *(Directory / TEXT("1000-NativeValidation.csv"))));
+    return true;
+}
+
 }
 #endif
