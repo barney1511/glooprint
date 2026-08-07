@@ -31,6 +31,8 @@ public:
 
 private:
     TUniquePtr<FGraphCaptureJob> Capture;
+    TWeakPtr<FMeasurementCache> Measurements;
+    uint64 MeasurementRevision = 0;
     void Schedule();
     void OnPostTick(float DeltaTime);
     bool Rebuild(float DeltaTime);

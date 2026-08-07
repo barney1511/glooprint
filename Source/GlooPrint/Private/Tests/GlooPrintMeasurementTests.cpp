@@ -379,7 +379,14 @@ public:
             if (Phase == 4)
             {
                 CheckStableRoutes();
-                Test.TestFalse(TEXT("Reopened same graph begins without cached geometry"), Editor->GetGraphPanel()->GetMetaData<FMeasurementCache>().IsValid());
+                const auto ReopenedCache = Editor->GetGraphPanel()->GetMetaData<FMeasurementCache>();
+                if (Test.TestTrue(TEXT("Reopened routing creates fresh shared measurements without F"), ReopenedCache.IsValid()))
+                {
+                    Test.TestEqual(TEXT("Reopen measures every node anew for routing"), ReopenedCache->GetMisses(), Fixture->Graph->Nodes.Num());
+                    Test.TestEqual(TEXT("Background routing retains every measured node"), ReopenedCache->GetEntryCount(), Fixture->Graph->Nodes.Num());
+                    ReopenedCache->Invalidate();
+                    Test.TestEqual(TEXT("Reopened F starts with explicitly cold geometry"), ReopenedCache->GetEntryCount(), 0);
+                }
                 EvaluateNativePinTooltip();
                 if (After != SerializeNodes(*Fixture->Graph))
                 {
@@ -746,6 +753,7 @@ public:
             Factory->Target = Fixture->Branch;
             FEdGraphUtilities::RegisterVisualNodeFactory(Factory);
             EvaluateNativePinTooltip();
+            if (const auto Cache = Editor->GetGraphPanel()->GetMetaData<FMeasurementCache>()) { Cache->Invalidate(); }
             Before = SerializeNodes(*Fixture->Graph);
             Queue = GEditor->Trans->GetQueueLength();
             Dirty = Fixture->Graph->GetOutermost()->IsDirty();

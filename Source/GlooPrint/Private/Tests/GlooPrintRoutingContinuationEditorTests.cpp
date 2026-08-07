@@ -1,6 +1,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include "GlooPrintTestUtils.h"
 #include "GlooPrintEditor.h"
+#include "GlooPrintMeasurementCache.h"
 #include "GlooPrintSettings.h"
 #include "GlooPrintWireDrawing.h"
 #include "Editor.h"
@@ -68,6 +69,15 @@ public:
         if (Phase == 0)
         {
             if (!Cache->HasPendingRouting()) { return false; }
+            if (MeasurementEvictionBuilds == INDEX_NONE)
+            {
+                const auto Measurements = Panel->GetMetaData<FMeasurementCache>();
+                if (!Test.TestTrue(TEXT("Pending routing owns shared measurements"), Measurements.IsValid())) { return Finish(); }
+                MeasurementEvictionBuilds = Cache->GetBuildCount(); Measurements->Invalidate();
+                return false;
+            }
+            if (Cache->GetBuildCount() == MeasurementEvictionBuilds) { return false; }
+            Test.TestTrue(TEXT("Evicting shared measurements restarts native capture"), Cache->GetBuildCount() > MeasurementEvictionBuilds);
             Test.TestFalse(TEXT("Incomplete native rebuild is not ready"), Cache->IsReady());
             Test.TestTrue(TEXT("Incomplete native rebuild exposes no partial routes"), Cache->GetRoutes().Wires.IsEmpty());
             Before = SerializeNodes(*Fixture->Graph);
@@ -152,6 +162,7 @@ private:
     TArray<uint8> Before, Changed;
     EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
     int32 Phase = 0, Frames = 0, Queue = 0, Builds = 0;
+    int32 MeasurementEvictionBuilds = INDEX_NONE;
     double Deadline = 0;
     bool bRestore = false;
 };

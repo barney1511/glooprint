@@ -495,8 +495,8 @@ void FEditor::ExecutePanel(TWeakPtr<SGraphPanel> WeakPanel)
             if (!Cache)
             {
                 Cache = MakeShared<FMeasurementCache>(); Panel->AddMetadata(Cache.ToSharedRef());
-                CachedPanels.RemoveAll([](const auto& Weak) { return !Weak.IsValid(); }); CachedPanels.Add(Panel);
             }
+            CachedPanels.RemoveAll([](const auto& Weak) { return !Weak.IsValid(); }); CachedPanels.AddUnique(Panel);
             FPendingFormat Request;
             Request.Panel = Panel; Request.Graph = Panel->GetGraphObj(); Request.Cache = Cache;
             Request.Scale = Window->GetDPIScaleFactor() * Slate.GetApplicationScale();

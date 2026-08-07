@@ -1,4 +1,5 @@
 #include "GlooPrintWireDrawing.h"
+#include "GlooPrintMeasurementCache.h"
 #include "GlooPrintSettings.h"
 
 #include "BlueprintConnectionDrawingPolicy.h"
@@ -41,8 +42,13 @@ void FRouteCache::Shutdown()
     bStopped = true; bReady = false; Routes = {}; Capture.Reset(); Routing.Reset();
     if (const auto Owner = Panel.Pin())
     {
+        if (const auto Cache = Measurements.Pin(); Cache && Owner->GetMetaData<FMeasurementCache>() == Cache)
+        {
+            Owner->RemoveMetaData(Cache.ToSharedRef());
+        }
         Owner->Invalidate(EInvalidateWidgetReason::Paint);
     }
+    Measurements.Reset();
     if (FSlateApplication::IsInitialized()) { FSlateApplication::Get().OnPostTick().Remove(RebuildHandle); }
     RebuildHandle.Reset();
     if (UEdGraph* LiveGraph = Graph.Get()) { LiveGraph->RemoveOnGraphChangedHandler(GraphHandle); }
@@ -73,6 +79,7 @@ void FRouteCache::ObserveContext()
 void FRouteCache::Invalidate()
 {
     if (bStopped) { return; }
+    if (const auto Cache = Measurements.Pin()) { Cache->Invalidate(); }
     bReady = false; Routes = {}; Capture.Reset(); Routing.Reset(); ++Revision; AttemptsLeft = 3;
     WireStyle = GetDefault<UGlooPrintSettings>()->GetWireStyle();
     if (WireStyle == EGlooPrintWireStyle::Native)
@@ -115,17 +122,34 @@ bool FRouteCache::Rebuild(float DeltaTime)
     FString Reason;
     if (!Routing)
     {
+        if (Capture)
+        {
+            const auto Cache = Measurements.Pin();
+            if (!Cache || Owner->GetMetaData<FMeasurementCache>() != Cache || Cache->GetRevision() != MeasurementRevision) { Capture.Reset(); }
+        }
         if (!Capture)
         {
-            FMeasurementOptions Options; Options.PinVisibility = PinVisibility;
+            if (!ValidateMeasurementGraph(Graph.Get(), Reason)) { Owner->Invalidate(EInvalidateWidgetReason::Paint); return false; }
+            auto Cache = Owner->GetMetaData<FMeasurementCache>();
+            if (!Cache)
+            {
+                Cache = MakeShared<FMeasurementCache>(); Owner->AddMetadata(Cache.ToSharedRef());
+            }
+            Measurements = Cache;
+            Cache->Begin(Graph.Get(), Scale, PinVisibility); MeasurementRevision = Cache->GetRevision();
+            FMeasurementOptions Options; Options.PinVisibility = PinVisibility; Options.Cache = Cache.Get();
             Capture = MakeUnique<FGraphCaptureJob>(Graph.Get(), Scale, TSet<FGuid>(), Options);
             RoutingRevision = Revision; ++BuildCount;
         }
         const uint64 RequestRevision = RoutingRevision;
+        const uint64 RequestMeasurementRevision = MeasurementRevision;
         auto Job = MoveTemp(Capture);
         const bool bFinished = Job->Advance(Deadline);
         if (bStopped) { return false; }
         if (Revision != RequestRevision) { return true; }
+        const auto CurrentMeasurements = Measurements.Pin();
+        if (!CurrentMeasurements || Owner->GetMetaData<FMeasurementCache>() != CurrentMeasurements ||
+            CurrentMeasurements->GetRevision() != RequestMeasurementRevision) { return true; }
         if (!bFinished) { Capture = MoveTemp(Job); return true; }
         FLayoutGraph Snapshot;
         bool bRetry = false;
@@ -155,7 +179,11 @@ void FRouteCache::OnModified(UObject* Object)
     UEdGraph* LiveGraph = Graph.Get();
     if (Object && LiveGraph && (Object == LiveGraph || Object->IsIn(LiveGraph) || LiveGraph->IsIn(Object))) { Invalidate(); }
 }
-void FRouteCache::OnPropertyChanged(UObject* Object, FPropertyChangedEvent& Event) { OnModified(Object); }
+void FRouteCache::OnPropertyChanged(UObject* Object, FPropertyChangedEvent& Event)
+{
+    if (const auto Cache = Measurements.Pin()) { Cache->Invalidate(); }
+    OnModified(Object);
+}
 void FRouteCache::OnTransacted(UObject* Object, const FTransactionObjectEvent& Event) { OnModified(Object); }
 void FRouteCache::OnSlateInvalidated(bool bClearResources) { Invalidate(); }
 void FRouteCache::OnFontsReleased(const FSlateFontCache& Fonts) { Invalidate(); }

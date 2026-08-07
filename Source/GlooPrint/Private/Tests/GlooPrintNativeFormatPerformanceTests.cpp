@@ -34,17 +34,20 @@ public:
         static constexpr TCHAR Prefix[] = TEXT("Formatted graph: ");
         if (FCString::Strncmp(Message, Prefix, UE_ARRAY_COUNT(Prefix) - 1) != 0) { LastMessage = Message; return; }
         CompletedAt = FPlatformTime::Seconds(); CompletedFrame = GFrameCounter;
+        if (const auto Cache = Measurements.Pin()) { Hits = Cache->GetHits(); Misses = Cache->GetMisses(); }
         Changed = FCString::Atoi(Message + UE_ARRAY_COUNT(Prefix) - 1); bArmed = false;
         TRACE_BOOKMARK(TEXT("GlooPrintNativeF complete %s changed=%d"), *Label, Changed);
     }
-    void Arm(FString InLabel)
+    void Arm(FString InLabel, TWeakPtr<FMeasurementCache> InMeasurements)
     {
-        Label = MoveTemp(InLabel); LastMessage.Reset(); Changed = -1; CompletedAt = 0; bArmed = true;
+        Label = MoveTemp(InLabel); Measurements = InMeasurements; LastMessage.Reset();
+        Changed = -1; Hits = -1; Misses = -1; CompletedAt = 0; bArmed = true;
     }
     FString Label, LastMessage;
+    TWeakPtr<FMeasurementCache> Measurements;
     double CompletedAt = 0;
     uint64 CompletedFrame = 0;
-    int32 Changed = -1;
+    int32 Changed = -1, Hits = -1, Misses = -1;
     bool bArmed = false;
 };
 }
@@ -70,16 +73,21 @@ public:
             if (!Completion.CompletedAt || !Routes || !Routes->IsReady()) { return false; }
             const double RoutesObservedMs = (FPlatformTime::Seconds() - StartedAt) * 1000;
             const double CommandMs = (FMath::Max(Completion.CompletedAt, DispatchEndedAt) - StartedAt) * 1000;
-            Csv += FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%d,%.6f,%.6f,%.6f,%llu,%d,%d\n"), *Family, Count, Pins, Count - 1, Sample,
+            Csv += FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%d,%.6f,%.6f,%.6f,%llu,%d,%d,%d,%d\n"), *Family, Count, Pins, Count - 1, Sample,
                 Phase == 1 ? TEXT("Format") : TEXT("Repeat"), CacheEntriesBefore, DispatchMs, CommandMs, RoutesObservedMs,
-                Completion.CompletedFrame - StartedFrame, Completion.Changed, Routes->GetRoutes().FallbackCount);
+                Completion.CompletedFrame - StartedFrame, Completion.Changed, Routes->GetRoutes().FallbackCount, Completion.Hits, Completion.Misses);
             if (Sample >= 0) { (Phase == 1 ? FormatTimes : RepeatTimes).Add(CommandMs); }
             Test.TestEqual(TEXT("Completed F retains every original connection"), Routes->GetRoutes().Wires.Num(), Count - 1);
             Test.TestEqual(TEXT("Completed chain has no native routing fallback"), Routes->GetRoutes().FallbackCount, 0);
+            if (bKeepMeasurementCache && CacheEntriesBefore == Count)
+            {
+                Test.TestEqual(TEXT("F reuses every node warmed by automatic routing"), Completion.Hits, Count);
+                Test.TestEqual(TEXT("Warmed F constructs no duplicate native node widgets"), Completion.Misses, 0);
+            }
             CheckContext();
             if (Phase == 1)
             {
-                Test.TestTrue(TEXT("Actual cold F changes this unformatted graph"), Completion.Changed > 0);
+                Test.TestTrue(TEXT("Actual F changes this unformatted graph"), Completion.Changed > 0);
                 Formatted = SerializeTransactionValues(*Fixture->Graph);
                 Test.TestTrue(TEXT("Successful format changes graph values"), Formatted != Before);
                 CheckProperties();
@@ -111,7 +119,10 @@ public:
                 Before = SerializeTransactionValues(*Fixture->Graph); Properties = DescribeNodes(*Fixture->Graph);
                 Anchor = FIntPoint(Entry->NodePosX, Entry->NodePosY); Editor->GetViewLocation(View, Zoom);
             }
-            if (const auto Cache = Panel->GetMetaData<FMeasurementCache>()) { Cache->Invalidate(); }
+            if (!bKeepMeasurementCache)
+            {
+                if (const auto Cache = Panel->GetMetaData<FMeasurementCache>()) { Cache->Invalidate(); }
+            }
             AppliedQueue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
             BeginRequest(false); Phase = 1; return false;
         }
@@ -127,6 +138,7 @@ private:
         Settings->bFormattingEnabled = true; Settings->WireStyle = EGlooPrintWireStyle::Rounded90;
         Settings->HorizontalSpacing = 96; Settings->VerticalSpacing = 48; Settings->CommentPadding = 32; Settings->NotifyChanged();
         FParse::Value(FCommandLine::Get(), TEXT("GlooPrintBenchmarkSamples="), SamplesWanted); SamplesWanted = FMath::Clamp(SamplesWanted, 1, 100);
+        bKeepMeasurementCache = FParse::Param(FCommandLine::Get(), TEXT("GlooPrintKeepMeasurementCache"));
         Directory = FPaths::ProjectSavedDir() / TEXT("GlooPrintBenchmarks"); IFileManager::Get().MakeDirectory(*Directory, true);
         Package.Reset(CreatePackage(*FString::Printf(TEXT("/Temp/GlooPrintNativeF_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
         Fixture = MakeUnique<FFixture>(UObject::StaticClass(), false, Package.Get());
@@ -155,9 +167,9 @@ private:
     {
         auto* Panel = Editor->GetGraphPanel(); const auto Cache = Panel->GetMetaData<FMeasurementCache>();
         CacheEntriesBefore = Cache ? Cache->GetEntryCount() : 0;
-        if (!bRepeat) { Test.TestEqual(TEXT("Measured format begins with cold native measurement cache"), CacheEntriesBefore, 0); }
+        if (!bRepeat && !bKeepMeasurementCache) { Test.TestEqual(TEXT("Measured format begins with cold native measurement cache"), CacheEntriesBefore, 0); }
         Package->SetDirtyFlag(false); FSlateApplication::Get().SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
-        Completion.Arm(FString::Printf(TEXT("%d.%s.%d.%s"), Count, *Family, Sample, bRepeat ? TEXT("Repeat") : TEXT("Format")));
+        Completion.Arm(FString::Printf(TEXT("%d.%s.%d.%s"), Count, *Family, Sample, bRepeat ? TEXT("Repeat") : TEXT("Format")), Cache);
         TRACE_BOOKMARK(TEXT("GlooPrintNativeF start %s cache=%d"), *Completion.Label, CacheEntriesBefore);
         StartedFrame = GFrameCounter; StartedAt = FPlatformTime::Seconds();
         bool bHandled = false;
@@ -196,12 +208,12 @@ private:
             if (SamplesWanted >= 20)
             {
                 Test.AddInfo(FString::Printf(TEXT("Native %d %s %s: %d samples after one warmup; successful-result p95 %.3fms, range %.3f–%.3fms. Includes native capture/planning/apply and intervening editor frames; excludes later automatic route readiness."),
-                    Count, *Family, bFormat ? TEXT("cold F") : TEXT("repeated F"), SamplesWanted, (*Times)[FMath::CeilToInt(Times->Num() * 0.95) - 1], (*Times)[0], Times->Last()));
+                    Count, *Family, bFormat ? (bKeepMeasurementCache ? TEXT("F with existing cache") : TEXT("cold F")) : TEXT("repeated F"), SamplesWanted, (*Times)[FMath::CeilToInt(Times->Num() * 0.95) - 1], (*Times)[0], Times->Last()));
             }
             else
             {
                 Test.AddInfo(FString::Printf(TEXT("Native %d %s %s diagnostic: %d samples after one warmup; successful-result range %.3f–%.3fms. No p95 or responsiveness claim."),
-                    Count, *Family, bFormat ? TEXT("cold F") : TEXT("repeated F"), SamplesWanted, (*Times)[0], Times->Last()));
+                    Count, *Family, bFormat ? (bKeepMeasurementCache ? TEXT("F with existing cache") : TEXT("cold F")) : TEXT("repeated F"), SamplesWanted, (*Times)[0], Times->Last()));
             }
         }
     }
@@ -212,7 +224,7 @@ private:
         TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
         Test.TestTrue(TEXT("Save native F benchmark capture"), FFileHelper::SaveArrayToFile(Png, *(Directory / (Stem() + TEXT(".png")))));
     }
-    FString Stem() const { return FString::Printf(TEXT("%d-NativeFormat-%s"), Count, *Family); }
+    FString Stem() const { return FString::Printf(TEXT("%d-NativeFormat-%s%s"), Count, *Family, bKeepMeasurementCache ? TEXT("-KeepCache") : TEXT("")); }
     bool Finish()
     {
         if (!Directory.IsEmpty()) { Test.TestTrue(TEXT("Save all native F samples"), FFileHelper::SaveStringToFile(Csv, *(Directory / (Stem() + TEXT(".csv"))))); }
@@ -252,8 +264,8 @@ private:
     double Deadline = 0, StartedAt = 0, DispatchEndedAt = 0, DispatchMs = 0;
     uint64 StartedFrame = 0;
     int32 Phase = 0, Frames = 0, Sample = -1, SamplesWanted = 3, Pins = 0, AppliedQueue = 0, NoOpQueue = 0, NoOpUndo = 0, CacheEntriesBefore = 0;
-    bool bRestore = false, bOriginalEnabled = true, bListening = false;
-    FString Csv = TEXT("family,nodes,pins,links,sample,operation,measurement_entries_before,initial_dispatch_ms,command_result_ms,routes_observed_ready_ms,command_frames,changed_nodes,fallbacks\n");
+    bool bRestore = false, bOriginalEnabled = true, bListening = false, bKeepMeasurementCache = false;
+    FString Csv = TEXT("family,nodes,pins,links,sample,operation,measurement_entries_before,initial_dispatch_ms,command_result_ms,routes_observed_ready_ms,command_frames,changed_nodes,fallbacks,measurement_hits,measurement_misses\n");
 };
 IMPLEMENT_COMPLEX_AUTOMATION_TEST(FNativeFormatPerformanceTest, "GlooPrint.Performance.NativeFormat",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::PerfFilter)

@@ -45,6 +45,10 @@ public:
             Window = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint module lifecycle"))).ClientSize(FVector2f(1200, 800))[Editor.ToSharedRef()];
             Slate.AddWindow(Window.ToSharedRef()); Editor->SetViewLocation(FVector2f(-100, -120), 0.75f);
             Editor->SetNodeSelection(Fixture->Branch, true); Slate.SetCursorPos(FVector2D::ZeroVector);
+            RouteOnlyEditor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(false);
+            RouteOnlyWindow = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint routing-only lifecycle")))
+                .ClientSize(FVector2f(500, 400))[RouteOnlyEditor.ToSharedRef()];
+            Slate.AddWindow(RouteOnlyWindow.ToSharedRef());
             Deadline = FPlatformTime::Seconds() + 40;
             return false;
         }
@@ -54,6 +58,7 @@ public:
         {
             Test.TestFalse(TEXT("Closing the reloaded panel releases its measurement cache"), ClosedMeasurement.IsValid());
             Test.TestFalse(TEXT("Closing the reloaded panel releases its route cache"), ClosedRoutes.IsValid());
+            Test.TestFalse(TEXT("Closing the panel never formatted releases its measurements"), ClosedRouteOnlyMeasurement.IsValid());
             return Finish();
         }
         auto* Panel = Editor->GetGraphPanel();
@@ -62,6 +67,10 @@ public:
         {
             HeldRoutes = Panel->GetMetaData<FRouteCache>();
             if (!HeldRoutes || !HeldRoutes->IsReady()) { return false; }
+            const auto OtherRoutes = RouteOnlyEditor->GetGraphPanel()->GetMetaData<FRouteCache>();
+            if (!OtherRoutes || !OtherRoutes->IsReady()) { return false; }
+            ClosedRouteOnlyMeasurement = RouteOnlyEditor->GetGraphPanel()->GetMetaData<FMeasurementCache>();
+            Test.TestTrue(TEXT("A panel never formatted owns automatic measurements"), ClosedRouteOnlyMeasurement.IsValid());
             MenuCount = FModuleManager::GetModuleChecked<FGraphEditorModule>(TEXT("GraphEditor")).GetAllGraphEditorContextMenuExtender().Num();
             CheckRegistrations(true);
             Factory = MakeShared<FDelayedNodeFactory>(); Factory->Target = Fixture->Branch;
@@ -70,6 +79,12 @@ public:
             const auto Pin = Node ? Node->FindWidgetForPin(Fixture->Print->FindPinChecked(TEXT("InString"))) : nullptr;
             const auto Tooltip = Pin ? Pin->GetToolTip() : nullptr;
             Test.TestTrue(TEXT("Prime the native serialized function-pin tooltip"), Tooltip && !Tooltip->IsEmpty());
+            if (const auto InitialMeasurements = Panel->GetMetaData<FMeasurementCache>();
+                Test.TestTrue(TEXT("Automatic routing warms measurements before any F"), InitialMeasurements.IsValid()))
+            {
+                Test.TestEqual(TEXT("Automatic routing caches every native node"), InitialMeasurements->GetEntryCount(), Fixture->Graph->Nodes.Num());
+                InitialMeasurements->Invalidate();
+            }
             Package->SetDirtyFlag(false); Before = SerializeNodes(*Fixture->Graph); Queue = GEditor->Trans->GetQueueLength();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
             Test.TestTrue(TEXT("F starts a pending format before module shutdown"), PressF());
@@ -87,6 +102,7 @@ public:
             if (!Test.TestTrue(TEXT("Native module manager unloads the module instance"), bNeedsReload)) { return Finish(); }
             CheckRegistrations(false);
             Test.TestFalse(TEXT("Shutdown releases the pending measurement cache"), ClosedMeasurement.IsValid());
+            Test.TestFalse(TEXT("Shutdown releases measurements in a panel never formatted"), ClosedRouteOnlyMeasurement.IsValid());
             Test.TestFalse(TEXT("Shutdown removes route metadata from the live panel"), Panel->GetMetaData<FRouteCache>().IsValid());
             Test.TestTrue(TEXT("Shutdown clears retained route data"), !HeldRoutes->IsReady() && HeldRoutes->GetRoutes().Wires.IsEmpty());
             FEdGraphUtilities::UnregisterVisualNodeFactory(Factory); Factory.Reset();
@@ -100,6 +116,8 @@ public:
             Test.TestEqual(TEXT("Stopped route cache performs no queued rebuild"), HeldRoutes->GetBuildCount(), OldBuilds);
             Test.TestFalse(TEXT("Unloaded module recreates no measurement metadata"), Panel->GetMetaData<FMeasurementCache>().IsValid());
             Test.TestFalse(TEXT("Unloaded module recreates no route metadata"), Panel->GetMetaData<FRouteCache>().IsValid());
+            Test.TestFalse(TEXT("Routing-only panel recreates no measurement metadata while unloaded"),
+                RouteOnlyEditor->GetGraphPanel()->GetMetaData<FMeasurementCache>().IsValid());
             Capture(TEXT("GlooPrint-ModuleStopped.png"));
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly); PressF();
             CheckUnchanged(TEXT("F with GlooPrint unloaded"));
@@ -115,7 +133,10 @@ public:
             Test.TestEqual(TEXT("Reload retains both original wire pairs"), NewRoutes->GetRoutes().Wires.Num(), 2);
             Test.TestEqual(TEXT("Reloaded routes need no native fallback"), NewRoutes->GetRoutes().FallbackCount, 0);
             Test.TestEqual(TEXT("Retired cache remains stopped after module reload"), HeldRoutes->GetBuildCount(), OldBuilds);
-            Test.TestFalse(TEXT("Reload does not revive pending measurement work"), Panel->GetMetaData<FMeasurementCache>().IsValid());
+            Test.TestFalse(TEXT("Reload never revives the old pending measurement cache"), ClosedMeasurement.IsValid());
+            const auto ReloadedMeasurements = Panel->GetMetaData<FMeasurementCache>();
+            Test.TestTrue(TEXT("Reloaded routing warms a fresh measurement cache before F"),
+                ReloadedMeasurements && ReloadedMeasurements->GetEntryCount() == Fixture->Graph->Nodes.Num());
             Capture(TEXT("GlooPrint-ModuleReloaded.png"));
             Queue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
             Slate.SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
@@ -143,9 +164,12 @@ public:
         Test.TestTrue(TEXT("Reloaded second F is a no-op"), After == SerializeNodes(*Fixture->Graph));
         Test.TestEqual(TEXT("Reloaded no-op adds no extra transaction"), GEditor->Trans->GetQueueLength(), Queue + 1);
         ClosedMeasurement = Panel->GetMetaData<FMeasurementCache>(); ClosedRoutes = Panel->GetMetaData<FRouteCache>();
+        ClosedRouteOnlyMeasurement = RouteOnlyEditor->GetGraphPanel()->GetMetaData<FMeasurementCache>();
+        Test.TestTrue(TEXT("Reloaded routing-only panel has fresh measurements before closure"), ClosedRouteOnlyMeasurement.IsValid());
         Test.TestTrue(TEXT("Reloaded panel owns both caches before closure"), ClosedMeasurement.IsValid() && ClosedRoutes.IsValid());
         HeldRoutes.Reset();
         Window->RequestDestroyWindow(); Editor.Reset(); Window.Reset();
+        RouteOnlyWindow->RequestDestroyWindow(); RouteOnlyEditor.Reset(); RouteOnlyWindow.Reset();
         Phase = 4; Frames = 0; return false;
     }
 private:
@@ -199,6 +223,7 @@ private:
         if (!bRestore) { return; } bRestore = false;
         if (Factory) { FEdGraphUtilities::UnregisterVisualNodeFactory(Factory); Factory.Reset(); }
         if (Window) { Window->RequestDestroyWindow(); Editor.Reset(); Window.Reset(); }
+        if (RouteOnlyWindow) { RouteOnlyWindow->RequestDestroyWindow(); RouteOnlyEditor.Reset(); RouteOnlyWindow.Reset(); }
         Reload(); HeldRoutes.Reset();
         auto* Settings = GetMutableDefault<UGlooPrintSettings>();
         Settings->WireStyle = OriginalStyle; Settings->bFormattingEnabled = bOriginalEnabled; Settings->NotifyChanged();
@@ -211,10 +236,13 @@ private:
     TUniquePtr<FFixture> Fixture;
     TSharedPtr<SGraphEditor> Editor;
     TSharedPtr<SWindow> Window;
+    TSharedPtr<SGraphEditor> RouteOnlyEditor;
+    TSharedPtr<SWindow> RouteOnlyWindow;
     TSharedPtr<FDelayedNodeFactory> Factory;
     TSharedPtr<FRouteCache> HeldRoutes;
     TWeakPtr<FRouteCache> ClosedRoutes;
     TWeakPtr<FMeasurementCache> ClosedMeasurement;
+    TWeakPtr<FMeasurementCache> ClosedRouteOnlyMeasurement;
     TArray<uint8> Before, After;
     FVector2D OriginalCursor;
     const void* PreviousModuleIdentity = nullptr;
