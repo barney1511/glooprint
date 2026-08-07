@@ -39,6 +39,7 @@ void Include(FMeasuredRect& Bounds, const FVector2f& Min, const FVector2f& Max)
 
 bool RefreshTextControls(const TSharedRef<SGraphNode>& Node, float LayoutScale)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_MeasureNodeTextRefresh);
     TArray<TSharedRef<SWidget>> Pending { Node };
     int32 Visited = 0;
     while (!Pending.IsEmpty())
@@ -121,7 +122,11 @@ bool MeasureNode(UEdGraphNode& Node, float LayoutScale, FMeasuredNode& Out, FStr
 
 
     FRestoreNodeWidgetReference RestoreWidgetReference(Node);
-    const TSharedPtr<SGraphNode> Widget = FNodeFactory::CreateNodeWidget(&Node);
+    TSharedPtr<SGraphNode> Widget;
+    {
+        TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_MeasureNodeFactory);
+        Widget = FNodeFactory::CreateNodeWidget(&Node);
+    }
     if (!Widget || Widget->RequiresSecondPassLayout())
     {
         Reason = TEXT("The node requires an unavailable widget or dependent layout.");
@@ -156,23 +161,26 @@ bool MeasureNode(UEdGraphNode& Node, float LayoutScale, FMeasuredNode& Out, FStr
     }
     FVector2f Size = FVector2f::ZeroVector;
     bool bSizeSettled = false;
-    for (int32 Pass = 0; Pass < 4; ++Pass)
     {
-        Widget->MarkPrepassAsDirty();
-        Widget->SlatePrepass(LayoutScale);
-        FSlateAttributeMetaData::UpdateAllAttributes(*Widget,
-            FSlateAttributeMetaData::EInvalidationPermission::AllowInvalidationIfConstructed);
-        const FVector2f NextSize(Widget->GetDesiredSize());
-        if (Pass == 0 && !RefreshTextControls(Widget.ToSharedRef(), LayoutScale))
+        TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_MeasureNodePrepass);
+        for (int32 Pass = 0; Pass < 4; ++Pass)
         {
-            Reason = TEXT("The native widget hierarchy exceeds the measurement limit.");
-            return false;
-        }
-        bSizeSettled = Pass > 0 && NextSize == Size;
-        Size = NextSize;
-        if (bSizeSettled)
-        {
-            break;
+            Widget->MarkPrepassAsDirty();
+            Widget->SlatePrepass(LayoutScale);
+            FSlateAttributeMetaData::UpdateAllAttributes(*Widget,
+                FSlateAttributeMetaData::EInvalidationPermission::AllowInvalidationIfConstructed);
+            const FVector2f NextSize(Widget->GetDesiredSize());
+            if (Pass == 0 && !RefreshTextControls(Widget.ToSharedRef(), LayoutScale))
+            {
+                Reason = TEXT("The native widget hierarchy exceeds the measurement limit.");
+                return false;
+            }
+            bSizeSettled = Pass > 0 && NextSize == Size;
+            Size = NextSize;
+            if (bSizeSettled)
+            {
+                break;
+            }
         }
     }
     if (!bSizeSettled || !IsFinite(Size) || Size.X <= 0.0f || Size.Y <= 0.0f)
@@ -188,112 +196,119 @@ bool MeasureNode(UEdGraphNode& Node, float LayoutScale, FMeasuredNode& Out, FStr
     Out.VisualBounds = { FVector2f::ZeroVector, Size };
 
     TArray<TSharedRef<SWidget>> PinWidgets;
-    Widget->GetPins(PinWidgets);
     TMap<const SWidget*, int32> WidgetPins;
-    WidgetPins.Reserve(PinWidgets.Num());
-    for (const TSharedRef<SWidget>& PinWidget : PinWidgets)
-    {
-        const UEdGraphPin* Pin = StaticCastSharedRef<SGraphPin>(PinWidget)->GetPinObj();
-        const int32* Index = PinIndices.Find(Pin);
-        if (!Index)
-        {
-            Reason = TEXT("The native widget contains a pin outside this node snapshot.");
-            return false;
-        }
-        WidgetPins.Add(&PinWidget.Get(), *Index);
-    }
-
     TArray<FArrangedWidget> Pending;
-    Pending.Emplace(Widget.ToSharedRef(), FGeometry::MakeRoot(Size, FSlateLayoutTransform()));
-    int32 Visited = 0;
-    while (!Pending.IsEmpty())
     {
-        const FArrangedWidget Current = Pending.Pop(EAllowShrinking::No);
-        if (++Visited > MaxWidgetsPerNode)
+        TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_MeasureNodeArrange);
+        Widget->GetPins(PinWidgets);
+        WidgetPins.Reserve(PinWidgets.Num());
+        for (const TSharedRef<SWidget>& PinWidget : PinWidgets)
         {
-            Reason = TEXT("The native widget hierarchy exceeds the measurement limit.");
-            return false;
-        }
-        const FVector2f LocalSize(Current.Geometry.GetLocalSize());
-        const FVector2f Min(Current.Geometry.LocalToAbsolute(FVector2f::ZeroVector));
-        const FVector2f Max(Current.Geometry.LocalToAbsolute(LocalSize));
-        if (!IsFinite(Min) || !IsFinite(Max) || Max.X < Min.X || Max.Y < Min.Y)
-        {
-            Reason = TEXT("The native widget supplied invalid arranged geometry.");
-            return false;
-        }
-        Include(Out.VisualBounds, Min, Max);
-        if (const int32* Index = WidgetPins.Find(&Current.Widget.Get()))
-        {
-            if (LocalSize.X <= 0.0f || LocalSize.Y <= 0.0f)
+            const UEdGraphPin* Pin = StaticCastSharedRef<SGraphPin>(PinWidget)->GetPinObj();
+            const int32* Index = PinIndices.Find(Pin);
+            if (!Index)
             {
-                bNeedsRetry = true;
-                Reason = TEXT("A visible pin has no reliable arranged geometry.");
+                Reason = TEXT("The native widget contains a pin outside this node snapshot.");
                 return false;
             }
-            const UEdGraphPin* Pin = Node.Pins[*Index];
-            const FVector2f Point(Pin->Direction == EGPD_Output ? LocalSize.X : 0.0f,
-                LocalSize.Y * 0.5f);
-            Out.Pins[*Index].AttachmentOffset = FVector2f(Current.Geometry.LocalToAbsolute(Point));
+            WidgetPins.Add(&PinWidget.Get(), *Index);
         }
-        FArrangedChildren Children(EVisibility::Visible);
-        Current.Widget->ArrangeChildren(Current.Geometry, Children, true);
-        if (Visited + Pending.Num() + Children.Num() > MaxWidgetsPerNode)
-        {
-            Reason = TEXT("The native widget hierarchy exceeds the measurement limit.");
-            return false;
-        }
-        for (int32 Index = Children.Num() - 1; Index >= 0; --Index)
-        {
-            Pending.Add(Children[Index]);
-        }
-    }
 
-    for (int32 Index = 0; Index < Node.Pins.Num(); ++Index)
-    {
-        const UEdGraphPin& Pin = *Node.Pins[Index];
-        if (!IsHiddenPin(Pin, Visibility) && !Out.Pins[Index].AttachmentOffset.IsSet())
+        Pending.Emplace(Widget.ToSharedRef(), FGeometry::MakeRoot(Size, FSlateLayoutTransform()));
+        int32 Visited = 0;
+        while (!Pending.IsEmpty())
         {
-            bNeedsRetry = true;
-            Reason = FString::Printf(TEXT("Required pin '%s' has no arranged attachment."), *Pin.PinName.ToString());
-            return false;
+            const FArrangedWidget Current = Pending.Pop(EAllowShrinking::No);
+            if (++Visited > MaxWidgetsPerNode)
+            {
+                Reason = TEXT("The native widget hierarchy exceeds the measurement limit.");
+                return false;
+            }
+            const FVector2f LocalSize(Current.Geometry.GetLocalSize());
+            const FVector2f Min(Current.Geometry.LocalToAbsolute(FVector2f::ZeroVector));
+            const FVector2f Max(Current.Geometry.LocalToAbsolute(LocalSize));
+            if (!IsFinite(Min) || !IsFinite(Max) || Max.X < Min.X || Max.Y < Min.Y)
+            {
+                Reason = TEXT("The native widget supplied invalid arranged geometry.");
+                return false;
+            }
+            Include(Out.VisualBounds, Min, Max);
+            if (const int32* Index = WidgetPins.Find(&Current.Widget.Get()))
+            {
+                if (LocalSize.X <= 0.0f || LocalSize.Y <= 0.0f)
+                {
+                    bNeedsRetry = true;
+                    Reason = TEXT("A visible pin has no reliable arranged geometry.");
+                    return false;
+                }
+                const UEdGraphPin* Pin = Node.Pins[*Index];
+                const FVector2f Point(Pin->Direction == EGPD_Output ? LocalSize.X : 0.0f,
+                    LocalSize.Y * 0.5f);
+                Out.Pins[*Index].AttachmentOffset = FVector2f(Current.Geometry.LocalToAbsolute(Point));
+            }
+            FArrangedChildren Children(EVisibility::Visible);
+            Current.Widget->ArrangeChildren(Current.Geometry, Children, true);
+            if (Visited + Pending.Num() + Children.Num() > MaxWidgetsPerNode)
+            {
+                Reason = TEXT("The native widget hierarchy exceeds the measurement limit.");
+                return false;
+            }
+            for (int32 Index = Children.Num() - 1; Index >= 0; --Index)
+            {
+                Pending.Add(Children[Index]);
+            }
         }
+
+        for (int32 Index = 0; Index < Node.Pins.Num(); ++Index)
+        {
+            const UEdGraphPin& Pin = *Node.Pins[Index];
+            if (!IsHiddenPin(Pin, Visibility) && !Out.Pins[Index].AttachmentOffset.IsSet())
+            {
+                bNeedsRetry = true;
+                Reason = FString::Printf(TEXT("Required pin '%s' has no arranged attachment."), *Pin.PinName.ToString());
+                return false;
+            }
+        }
+
     }
 
     TArray<FOverlayBrushInfo> Brushes;
-    Widget->GetOverlayBrushes(false, Size, Brushes);
-    for (const FOverlayBrushInfo& Overlay : Brushes)
     {
-        if (Overlay.Brush)
+        TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_MeasureNodeOverlays);
+        Widget->GetOverlayBrushes(false, Size, Brushes);
+        for (const FOverlayBrushInfo& Overlay : Brushes)
         {
-            const FVector2f Offset(Overlay.OverlayOffset);
-            const FVector2f Envelope(Overlay.AnimationEnvelope);
-            const FVector2f BrushSize(Overlay.Brush->ImageSize);
-            if (!IsFinite(Offset) || !IsFinite(Envelope) || !IsFinite(BrushSize))
-            {
-                Reason = TEXT("The node supplied invalid overlay bounds.");
-                return false;
-            }
-            const FVector2f Extent(FMath::Abs(Envelope.X), FMath::Abs(Envelope.Y));
-            Include(Out.VisualBounds, Offset - Extent, Offset + BrushSize + Extent);
-        }
-    }
-    for (const FOverlayWidgetInfo& Overlay : Widget->GetOverlayWidgets(false, Size))
-    {
-        if (Overlay.Widget)
-        {
-            Overlay.Widget->SlatePrepass(LayoutScale);
-            if (Overlay.Widget->GetVisibility().IsVisible())
+            if (Overlay.Brush)
             {
                 const FVector2f Offset(Overlay.OverlayOffset);
-                const FVector2f OverlaySize(Overlay.Widget->GetDesiredSize());
-                if (!IsFinite(Offset) || !IsFinite(OverlaySize) || OverlaySize.X <= 0 || OverlaySize.Y <= 0)
+                const FVector2f Envelope(Overlay.AnimationEnvelope);
+                const FVector2f BrushSize(Overlay.Brush->ImageSize);
+                if (!IsFinite(Offset) || !IsFinite(Envelope) || !IsFinite(BrushSize))
                 {
-                    bNeedsRetry = IsFinite(Offset) && IsFinite(OverlaySize);
-                    Reason = TEXT("The node supplied unavailable overlay geometry.");
+                    Reason = TEXT("The node supplied invalid overlay bounds.");
                     return false;
                 }
-                Include(Out.VisualBounds, Offset, Offset + OverlaySize);
+                const FVector2f Extent(FMath::Abs(Envelope.X), FMath::Abs(Envelope.Y));
+                Include(Out.VisualBounds, Offset - Extent, Offset + BrushSize + Extent);
+            }
+        }
+        for (const FOverlayWidgetInfo& Overlay : Widget->GetOverlayWidgets(false, Size))
+        {
+            if (Overlay.Widget)
+            {
+                Overlay.Widget->SlatePrepass(LayoutScale);
+                if (Overlay.Widget->GetVisibility().IsVisible())
+                {
+                    const FVector2f Offset(Overlay.OverlayOffset);
+                    const FVector2f OverlaySize(Overlay.Widget->GetDesiredSize());
+                    if (!IsFinite(Offset) || !IsFinite(OverlaySize) || OverlaySize.X <= 0 || OverlaySize.Y <= 0)
+                    {
+                        bNeedsRetry = IsFinite(Offset) && IsFinite(OverlaySize);
+                        Reason = TEXT("The node supplied unavailable overlay geometry.");
+                        return false;
+                    }
+                    Include(Out.VisualBounds, Offset, Offset + OverlaySize);
+                }
             }
         }
     }
