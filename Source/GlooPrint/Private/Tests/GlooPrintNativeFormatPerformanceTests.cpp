@@ -1,8 +1,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
-#include "GlooPrintTestUtils.h"
+#include "GlooPrintNativeBenchmarkFixture.h"
 #include "GlooPrintMeasurementCache.h"
 #include "GlooPrintSettings.h"
 #include "GlooPrintWireDrawing.h"
+#include "BlueprintEditor.h"
 #include "Editor.h"
 #include "Editor/Transactor.h"
 #include "Framework/Application/SlateApplication.h"
@@ -17,32 +18,13 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/MiscTrace.h"
 #include "SGraphPanel.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "Widgets/SWindow.h"
 
 namespace GlooPrint::Tests
 {
 namespace
 {
-bool PopulateNativeChain(FAutomationTestBase& Test, FFixture& Fixture, int32 Count, int32 Outputs,
-    UK2Node_ExecutionSequence*& Entry, int32& Pins)
-{
-    UK2Node_ExecutionSequence* Previous = nullptr;
-    for (int32 I = 0; I < Count; ++I)
-    {
-        auto* Node = Fixture.Add<UK2Node_ExecutionSequence>({float(((I * 7) % 10) * 512), float((I / 10) * (Outputs * 32 + 160))});
-        Node->NodeGuid = FGuid(0, 0, 0, I + 1);
-        for (int32 P = 2; P < Outputs; ++P) { Node->AddInputPin(); }
-        if (Previous && !Fixture.Graph->GetSchema()->TryCreateConnection(Previous->GetThenPinGivenIndex(0), Node->FindPinChecked(UEdGraphSchema_K2::PN_Execute)))
-        {
-            Test.AddError(TEXT("Native schema refused the benchmark chain.")); return false;
-        }
-        if (!Entry) { Entry = Node; }
-        for (UEdGraphPin* Pin : Node->Pins) { FString Tooltip; Node->GetPinHoverText(*Pin, Tooltip); }
-        Pins += Node->Pins.Num(); Previous = Node;
-    }
-    return true;
-}
-
 class FFormatCompletion final : public FOutputDevice
 {
 public:
@@ -55,18 +37,23 @@ public:
         if (FCString::Strncmp(Message, Prefix, UE_ARRAY_COUNT(Prefix) - 1) != 0) { LastMessage = Message; return; }
         CompletedAt = FPlatformTime::Seconds(); CompletedFrame = GFrameCounter;
         if (const auto Cache = Measurements.Pin()) { Hits = Cache->GetHits(); Misses = Cache->GetMisses(); }
-        if (const auto Owner = GraphEditor.Pin()) { Owner->GetViewLocation(View, Zoom); }
+        if (const auto Owner = GraphEditor.Pin())
+        {
+            Owner->GetViewLocation(View, Zoom);
+            Selection.Reset(); for (UObject* Node : Owner->GetSelectedNodes()) { Selection.Add(Node); }
+        }
         Changed = FCString::Atoi(Message + UE_ARRAY_COUNT(Prefix) - 1); bArmed = false;
         TRACE_BOOKMARK(TEXT("GlooPrintNativeF complete %s changed=%d"), *Label, Changed);
     }
     void Arm(FString InLabel, TWeakPtr<FMeasurementCache> InMeasurements)
     {
         Label = MoveTemp(InLabel); Measurements = InMeasurements; LastMessage.Reset();
-        Changed = -1; Hits = -1; Misses = -1; CompletedAt = 0; bArmed = true;
+        Changed = -1; Hits = -1; Misses = -1; CompletedAt = 0; Selection.Reset(); bArmed = true;
     }
     FString Label, LastMessage;
     TWeakPtr<FMeasurementCache> Measurements;
     TWeakPtr<SGraphEditor> GraphEditor;
+    TArray<TWeakObjectPtr<UObject>> Selection;
     FVector2f View;
     float Zoom = 0;
     double CompletedAt = 0;
@@ -148,7 +135,12 @@ public:
                 if (const auto Cache = Panel->GetMetaData<FMeasurementCache>()) { Cache->Invalidate(); }
             }
             AppliedQueue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
+            if (bUseAssetEditor && Sample >= 0) { Editor->SetNodeSelection(Entry, true); }
             BeginRequest(false); Phase = 1; return false;
+        }
+        if (bUseAssetEditor)
+        {
+            Test.TestEqual(TEXT("Native Blueprint undo/redo cleared selection before repeated F"), Editor->GetSelectedNodes().Num(), 0);
         }
         NoOpQueue = GEditor->Trans->GetQueueLength(); NoOpUndo = GEditor->Trans->GetUndoCount();
         BeginRequest(true); Phase = 3; return false;
@@ -162,15 +154,32 @@ private:
         Settings->bFormattingEnabled = true; Settings->WireStyle = EGlooPrintWireStyle::Rounded90;
         Settings->HorizontalSpacing = 96; Settings->VerticalSpacing = 48; Settings->CommentPadding = 32; Settings->NotifyChanged();
         FParse::Value(FCommandLine::Get(), TEXT("GlooPrintBenchmarkSamples="), SamplesWanted); SamplesWanted = FMath::Clamp(SamplesWanted, 1, 100);
+        if (FParse::Param(FCommandLine::Get(), TEXT("GlooPrintBenchmarkWarmupOnly"))) { SamplesWanted = 0; }
         bKeepMeasurementCache = FParse::Param(FCommandLine::Get(), TEXT("GlooPrintKeepMeasurementCache"));
+        bUseAssetEditor = FParse::Param(FCommandLine::Get(), TEXT("GlooPrintBenchmarkAssetEditor"));
         Directory = FPaths::ProjectSavedDir() / TEXT("GlooPrintBenchmarks"); IFileManager::Get().MakeDirectory(*Directory, true);
         Package.Reset(CreatePackage(*FString::Printf(TEXT("/Temp/GlooPrintNativeF_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
         Fixture = MakeUnique<FFixture>(UObject::StaticClass(), false, Package.Get());
         if (!PopulateNativeChain(Test, *Fixture, Count, Family == TEXT("PinHeavy") ? 64 : 2, Entry, Pins)) { return Finish(); }
-        Editor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(true);
-        Window = SNew(SWindow).Title(FText::FromString(FString::Printf(TEXT("GlooPrint native F: %d %s"), Count, *Family)))
-            .ClientSize(FVector2f(1450, 1000))[Editor.ToSharedRef()];
-        Slate.AddWindow(Window.ToSharedRef()); Editor->SetNodeSelection(Entry, true); Editor->ZoomToFit(false); Slate.SetCursorPos(FVector2D::ZeroVector);
+        if (bUseAssetEditor)
+        {
+            auto* Editors = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+            if (!Test.TestTrue(TEXT("Open benchmark Blueprint editor"), Editors->OpenEditorForAsset(Fixture->Blueprint.Get()))) { return Finish(); }
+            auto* Instance = Editors->FindEditorForAsset(Fixture->Blueprint.Get(), true);
+            if (!Test.TestTrue(TEXT("Benchmark uses BlueprintEditor"), Instance && Instance->GetEditorName() == TEXT("BlueprintEditor"))) { return Finish(); }
+            Editor = static_cast<FBlueprintEditor*>(Instance)->OpenGraphAndBringToFront(Fixture->Graph);
+            if (!Test.TestTrue(TEXT("Blueprint benchmark graph is available"), Editor.IsValid())) { return Finish(); }
+            Window = Slate.FindWidgetWindow(Editor.ToSharedRef());
+            if (!Test.TestTrue(TEXT("Blueprint benchmark has a native window"), Window.IsValid())) { return Finish(); }
+        }
+        else
+        {
+            Editor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(true);
+            Window = SNew(SWindow).Title(FText::FromString(FString::Printf(TEXT("GlooPrint native F: %d %s"), Count, *Family)))
+                .ClientSize(FVector2f(1450, 1000))[Editor.ToSharedRef()];
+            Slate.AddWindow(Window.ToSharedRef());
+        }
+        Editor->SetNodeSelection(Entry, true); Editor->ZoomToFit(false); Slate.SetCursorPos(FVector2D::ZeroVector);
         Completion.GraphEditor = Editor;
         GLog->AddOutputDevice(&Completion); bListening = true; Deadline = FPlatformTime::Seconds() + 180; return false;
     }
@@ -181,7 +190,17 @@ private:
         if (!bRepeat && !bKeepMeasurementCache) { Test.TestEqual(TEXT("Measured format begins with cold native measurement cache"), CacheEntriesBefore, 0); }
         Package->SetDirtyFlag(false); FSlateApplication::Get().SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
         Completion.Arm(FString::Printf(TEXT("%d.%s.%d.%s"), Count, *Family, Sample, bRepeat ? TEXT("Repeat") : TEXT("Format")), Cache);
+        RequestSelection.Reset(); for (UObject* Node : Editor->GetSelectedNodes()) { RequestSelection.Add(Node); }
+        if (!bRepeat)
+        {
+            Test.TestTrue(TEXT("Independent format starts with its selected anchor"), RequestSelection.Num() == 1 && RequestSelection[0].Get() == Entry);
+        }
         Editor->GetViewLocation(RequestView, RequestZoom);
+        if (bUseAssetEditor)
+        {
+            const FVector2f Size = Panel->GetCachedGeometry().GetLocalSize();
+            Test.AddInfo(FString::Printf(TEXT("Native F uses full Blueprint editor; graph panel %.1fx%.1f, zoom %.6f; rounded wires, spacing96/48, comment padding32."), Size.X, Size.Y, RequestZoom));
+        }
         Test.TestTrue(*FString::Printf(TEXT("%s begins at the original camera: initial=(%.9g,%.9g) zoom=%.9g, before F=(%.9g,%.9g) zoom=%.9g"),
             *Completion.Label, View.X, View.Y, Zoom, RequestView.X, RequestView.Y, RequestZoom), RequestView == View && RequestZoom == Zoom);
         TRACE_BOOKMARK(TEXT("GlooPrintNativeF start %s cache=%d"), *Completion.Label, CacheEntriesBefore);
@@ -199,7 +218,12 @@ private:
     void CheckContext()
     {
         Test.TestEqual(TEXT("Whole F keeps its selected anchor fixed"), FIntPoint(Entry->NodePosX, Entry->NodePosY), Anchor);
-        Test.TestTrue(TEXT("Whole F retains the original selection"), Editor->GetSelectedNodes().Num() == 1 && Editor->GetSelectedNodes().Contains(Entry));
+        bool bSameSelection = Editor->GetSelectedNodes().Num() == RequestSelection.Num() && Completion.Selection.Num() == RequestSelection.Num();
+        for (const auto& Node : RequestSelection)
+        {
+            bSameSelection &= Node.IsValid() && Editor->GetSelectedNodes().Contains(Node.Get()) && Completion.Selection.Contains(Node);
+        }
+        Test.TestTrue(TEXT("Whole F retains its exact input selection at completion and route readiness"), bSameSelection);
         FVector2f CurrentView; float CurrentZoom = 0; Editor->GetViewLocation(CurrentView, CurrentZoom);
         Test.TestTrue(*FString::Printf(TEXT("Whole F retains camera position and zoom (%s): initial=(%.9g,%.9g) zoom=%.9g, before F=(%.9g,%.9g) zoom=%.9g, command result=(%.9g,%.9g) zoom=%.9g, routes ready=(%.9g,%.9g) zoom=%.9g"),
             *Completion.Label, View.X, View.Y, Zoom, RequestView.X, RequestView.Y, RequestZoom,
@@ -219,6 +243,11 @@ private:
     }
     void Summarize()
     {
+        if (SamplesWanted == 0)
+        {
+            Test.AddInfo(TEXT("Native F warmup-only diagnostic completed format, exact undo/redo and repeated no-op. Raw warmup timings are in the CSV; no measured sample or p95."));
+            return;
+        }
         for (auto* Times : {&FormatTimes, &RepeatTimes})
         {
             Times->Sort(); const bool bFormat = Times == &FormatTimes;
@@ -241,7 +270,8 @@ private:
         TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
         Test.TestTrue(TEXT("Save native F benchmark capture"), FFileHelper::SaveArrayToFile(Png, *(Directory / (Stem() + TEXT(".png")))));
     }
-    FString Stem() const { return FString::Printf(TEXT("%d-NativeFormat-%s%s"), Count, *Family, bKeepMeasurementCache ? TEXT("-KeepCache") : TEXT("")); }
+    FString Stem() const { return FString::Printf(TEXT("%d-NativeFormat-%s%s%s"), Count, *Family,
+        bKeepMeasurementCache ? TEXT("-KeepCache") : TEXT(""), bUseAssetEditor ? TEXT("-AssetEditor") : TEXT("")); }
     bool Finish()
     {
         if (!Directory.IsEmpty()) { Test.TestTrue(TEXT("Save all native F samples"), FFileHelper::SaveStringToFile(Csv, *(Directory / (Stem() + TEXT(".csv"))))); }
@@ -250,8 +280,13 @@ private:
     void Restore()
     {
         if (bListening) { Completion.bArmed = false; GLog->RemoveOutputDevice(&Completion); bListening = false; }
-        if (Window) { Window->RequestDestroyWindow(); Window.Reset(); Editor.Reset(); }
         if (Package) { Package->SetDirtyFlag(false); }
+        if (bUseAssetEditor && Fixture)
+        {
+            GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->CloseAllEditorsForAsset(Fixture->Blueprint.Get());
+        }
+        else if (Window) { Window->RequestDestroyWindow(); }
+        Window.Reset(); Editor.Reset();
         if (bRestore)
         {
             bRestore = false; auto* Settings = GetMutableDefault<UGlooPrintSettings>(); Settings->WireStyle = OriginalStyle;
@@ -273,6 +308,7 @@ private:
     EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
     TArray<uint8> Before, Formatted;
     TMap<FString, FString> Properties;
+    TArray<TWeakObjectPtr<UObject>> RequestSelection;
     TArray<double> FormatTimes, RepeatTimes;
     FVector2D OriginalCursor;
     FVector2f View, RequestView;
@@ -281,7 +317,7 @@ private:
     double Deadline = 0, StartedAt = 0, DispatchEndedAt = 0, DispatchMs = 0;
     uint64 StartedFrame = 0;
     int32 Phase = 0, Frames = 0, Sample = -1, SamplesWanted = 3, Pins = 0, AppliedQueue = 0, NoOpQueue = 0, NoOpUndo = 0, CacheEntriesBefore = 0;
-    bool bRestore = false, bOriginalEnabled = true, bListening = false, bKeepMeasurementCache = false;
+    bool bRestore = false, bOriginalEnabled = true, bListening = false, bKeepMeasurementCache = false, bUseAssetEditor = false;
     FString Csv = TEXT("family,nodes,pins,links,sample,operation,measurement_entries_before,initial_dispatch_ms,command_result_ms,routes_observed_ready_ms,command_frames,changed_nodes,fallbacks,measurement_hits,measurement_misses\n");
 };
 IMPLEMENT_COMPLEX_AUTOMATION_TEST(FNativeFormatPerformanceTest, "GlooPrint.Performance.NativeFormat",
