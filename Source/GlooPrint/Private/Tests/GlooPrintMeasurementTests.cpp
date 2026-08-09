@@ -261,6 +261,48 @@ bool FMeasurementContinuationTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMixedCacheContinuationTest, "GlooPrint.Measurement.MixedCacheContinuation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMixedCacheContinuationTest::RunTest(const FString& Parameters)
+{
+    FFixture Fixture;
+    const TSharedPtr<FMeasurementCache> Cache = MakeShared<FMeasurementCache>();
+    FMeasurementOptions Options; Options.Cache = Cache.Get();
+    FGraphMeasurement Expected, Actual;
+    FString Reason;
+    if (!TestTrue(TEXT("Warm native geometry is available"), MeasureGraph(Fixture.Graph, 1, Expected, Reason, Options))) { AddError(Reason); return false; }
+    FMeasurementJob Warm(Fixture.Graph, 1, Options);
+    TestFalse(TEXT("Expired warm capture yields before final state validation"), Warm.Advance(0));
+    TestTrue(TEXT("Fully cached capture needs only final validation on resume"), Warm.Advance(0));
+    if (TestTrue(TEXT("Fully cached result is complete"), Warm.TakeResult(Actual, Reason))) { Compare(*this, Expected, Actual); }
+    TestEqual(TEXT("All unchanged nodes reuse native geometry"), Cache->GetHits(), Fixture.Graph->Nodes.Num());
+    TestEqual(TEXT("Warm capture has no misses"), Cache->GetMisses(), 0);
+
+    Fixture.Branch->NodeComment += TEXT(" changed branch");
+    Fixture.Print->NodeComment += TEXT(" changed print");
+    const auto Before = SerializeNodes(*Fixture.Graph);
+    FMeasurementJob Mixed(Fixture.Graph, 1, Options);
+    TestFalse(TEXT("Mixed capture yields between fresh native measurements"), Mixed.Advance(0));
+    TestFalse(TEXT("Mixed pending capture cannot publish partial geometry"), Mixed.TakeResult(Actual, Reason));
+    TestTrue(TEXT("Pending mixed output is empty"), Actual.Nodes.IsEmpty());
+    TestTrue(TEXT("Remaining native measurement completes"), Mixed.Advance(TNumericLimits<double>::Max()));
+    if (!TestTrue(TEXT("Mixed cached/native result is complete"), Mixed.TakeResult(Actual, Reason))) { AddError(Reason); return false; }
+    TestEqual(TEXT("Only directly edited nodes miss"), Cache->GetMisses(), 2);
+    TestEqual(TEXT("Other nodes reuse measurements"), Cache->GetHits(), Fixture.Graph->Nodes.Num() - 2);
+    if (TestTrue(TEXT("Independent cold result measures"), MeasureGraph(Fixture.Graph, 1, Expected, Reason))) { Compare(*this, Expected, Actual); }
+    TestTrue(TEXT("Mixed capture preserves all graph values"), Before == SerializeNodes(*Fixture.Graph));
+
+    Fixture.Print->NodeComment += TEXT(" another edit");
+    FMeasurementJob Stale(Fixture.Graph, 1, Options);
+    TestFalse(TEXT("One cold node leaves final validation pending"), Stale.Advance(0));
+    Fixture.Branch->NodePosX += 16;
+    TestTrue(TEXT("Edit to an already copied warm node terminates capture"), Stale.Advance(TNumericLimits<double>::Max()));
+    TestFalse(TEXT("Final validation rejects stale cached geometry"), Stale.TakeResult(Actual, Reason));
+    TestTrue(TEXT("Rejected mixed snapshot exposes no nodes"), Actual.Nodes.IsEmpty());
+    TestTrue(TEXT("Failure identifies the unnotified state change"), Reason.Contains(TEXT("changed during capture")));
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGraphSnapshotTest, "GlooPrint.Editor.AnchorRulesAndConnectionValidation",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

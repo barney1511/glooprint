@@ -402,6 +402,7 @@ struct FMeasurementJob::FState
     TWeakObjectPtr<UEdGraph> Graph;
     TWeakPtr<FMeasurementCache> Cache;
     TArray<FNode> Nodes;
+    TArray<int32> PendingNodes;
     FGraphMeasurement Result;
     FString Reason;
     SGraphEditor::EPinVisibility Visibility;
@@ -443,8 +444,18 @@ bool FMeasurementJob::Advance(double Deadline)
         }
         if (Cache) { Cache->Begin(Graph, S.Scale, S.Visibility); S.Revision = Cache->GetRevision(); }
         S.Nodes.Reserve(Graph->Nodes.Num()); S.Result.Nodes.Reserve(Graph->Nodes.Num());
-        for (UEdGraphNode* Node : Graph->Nodes) { S.Nodes.Add({Node, CaptureMeasurementState(*Node)}); }
+        S.PendingNodes.Reserve(Graph->Nodes.Num());
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            const int32 Index = S.Nodes.Num();
+            S.Nodes.Add({Node, CaptureMeasurementState(*Node)});
+            FMeasuredNode& Measured = S.Result.Nodes.AddDefaulted_GetRef();
+            const FMeasuredNode* Cached = Cache ? Cache->Find(*Node, S.Nodes.Last().Signature) : nullptr;
+            if (Cached) { Measured = *Cached; }
+            else { S.PendingNodes.Add(Index); }
+        }
         S.bStarted = true;
+        if (S.PendingNodes.IsEmpty() && FPlatformTime::Seconds() >= Deadline) { return false; }
     }
     if (Graph->Nodes.Num() != S.Nodes.Num() || (Cache && Cache->GetRevision() != S.Revision))
     {
@@ -455,34 +466,30 @@ bool FMeasurementJob::Advance(double Deadline)
         if (S.Nodes[I].Node.Get() != Graph->Nodes[I]) { return Fail(TEXT("Node identities changed during capture.")); }
     }
     TSharedPtr<SGraphPanel> MeasurementPanel;
-    while (S.Next < S.Nodes.Num())
+    while (S.Next < S.PendingNodes.Num())
     {
-        const auto& Entry = S.Nodes[S.Next];
+        const int32 NodeIndex = S.PendingNodes[S.Next];
+        const auto& Entry = S.Nodes[NodeIndex];
         UEdGraphNode* Node = Entry.Node.Get();
         if (Entry.Signature != CaptureMeasurementState(*Node)) { return Fail(TEXT("A node changed during capture.")); }
         FMeasuredNode Measured;
-        const FMeasuredNode* Cached = Cache ? Cache->Find(*Node, Entry.Signature) : nullptr;
-        if (Cached) { Measured = *Cached; }
-        else
+        if (!MeasurementPanel && S.Visibility != SGraphEditor::Pin_Show)
         {
-            if (!MeasurementPanel && S.Visibility != SGraphEditor::Pin_Show)
-            {
-                MeasurementPanel = SNew(SGraphPanel).GraphObj(Graph).IsEditable(true).InitialZoomToFit(false);
-                MeasurementPanel->SetPinVisibility(S.Visibility);
-            }
-            if (!MeasureNode(*Node, S.Scale, Measured, S.Reason, MeasurementPanel, S.Visibility, S.bNeedsRetry))
-            {
-                S.Reason = FString::Printf(TEXT("%s: %s"), *Node->GetName(), *S.Reason);
-                S.bDone = true; return true;
-            }
-            if (!S.Graph.IsValid() || !Entry.Node.IsValid()) { return Fail(TEXT("The graph or node closed during measurement.")); }
-            if (Cache)
-            {
-                if (Cache->GetRevision() != S.Revision) { return Fail(TEXT("The measurement context changed during capture.")); }
-                Cache->Store(*Node, Entry.Signature, Measured);
-            }
+            MeasurementPanel = SNew(SGraphPanel).GraphObj(Graph).IsEditable(true).InitialZoomToFit(false);
+            MeasurementPanel->SetPinVisibility(S.Visibility);
         }
-        S.Result.Nodes.Add(MoveTemp(Measured)); ++S.Next;
+        if (!MeasureNode(*Node, S.Scale, Measured, S.Reason, MeasurementPanel, S.Visibility, S.bNeedsRetry))
+        {
+            S.Reason = FString::Printf(TEXT("%s: %s"), *Node->GetName(), *S.Reason);
+            S.bDone = true; return true;
+        }
+        if (!S.Graph.IsValid() || !Entry.Node.IsValid()) { return Fail(TEXT("The graph or node closed during measurement.")); }
+        if (Cache)
+        {
+            if (Cache->GetRevision() != S.Revision) { return Fail(TEXT("The measurement context changed during capture.")); }
+            Cache->Store(*Node, Entry.Signature, Measured);
+        }
+        S.Result.Nodes[NodeIndex] = MoveTemp(Measured); ++S.Next;
         if (FPlatformTime::Seconds() >= Deadline) { return false; }
     }
     if (!ValidateMeasurementGraph(Graph, S.Reason)) { S.bDone = true; return true; }
