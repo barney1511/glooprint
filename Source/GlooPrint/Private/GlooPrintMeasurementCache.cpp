@@ -1,4 +1,5 @@
 #include "GlooPrintMeasurementCache.h"
+#include "GlooPrintLayout.h"
 
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -8,9 +9,50 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Serialization/ObjectWriter.h"
 #include "Styling/AppStyle.h"
+#include "UObject/UnrealType.h"
 
 namespace GlooPrint
 {
+namespace
+{
+void AppendPresentationState(UEdGraphNode& Node, FObjectWriter& Writer)
+{
+    FString Title = Node.GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+    bool bHasMessage = Node.bHasCompilerMessage;
+    Writer << Title << bHasMessage << Node.ErrorType << Node.ErrorMsg;
+    for (const UEdGraphPin* Pin : Node.Pins)
+    {
+        uint64 Identity = reinterpret_cast<UPTRINT>(Pin);
+        Writer << Identity;
+    }
+}
+
+class FLayoutInvariantWriter final : public FObjectWriter
+{
+public:
+    explicit FLayoutInvariantWriter(TArray<uint8>& Bytes) : FObjectWriter(Bytes)
+    {
+        ArNoDelta = true; ArPortFlags |= PPF_DuplicateVerbatim;
+    }
+    virtual bool ShouldSkipProperty(const FProperty* Property) const override
+    {
+        return (Property->GetOwnerStruct() == UEdGraphNode::StaticClass() &&
+            (Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEdGraphNode, NodePosX) ||
+             Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEdGraphNode, NodePosY))) ||
+            FObjectWriter::ShouldSkipProperty(Property);
+    }
+};
+
+TArray<uint8> CaptureLayoutInvariantState(UEdGraphNode& Node)
+{
+    TArray<uint8> State;
+    FLayoutInvariantWriter Writer(State);
+    Node.Serialize(Writer);
+    AppendPresentationState(Node, Writer);
+    return State;
+}
+}
+
 FMeasurementCache::~FMeasurementCache()
 {
     if (UEdGraph* LiveGraph = Graph.Get()) { LiveGraph->RemoveOnGraphChangedHandler(GraphChangedHandle); }
@@ -43,11 +85,15 @@ void FMeasurementCache::Begin(UEdGraph* InGraph, float LayoutScale, SGraphEditor
     }
 }
 
-void FMeasurementCache::Invalidate() { Entries.Reset(); ++Revision; }
+void FMeasurementCache::Invalidate(bool bContextChanged)
+{
+    Entries.Reset(); ++Revision;
+    if (bContextChanged) { ++ContextRevision; }
+}
 
 void FMeasurementCache::OnGraphChanged(const FEdGraphEditAction& Action)
 {
-    if (Action.Nodes.IsEmpty()) { Invalidate(); return; }
+    if (Action.Nodes.IsEmpty()) { Invalidate(false); return; }
     ++Revision;
     for (const UEdGraphNode* Node : Action.Nodes)
     {
@@ -72,19 +118,71 @@ void FMeasurementCache::Store(const UEdGraphNode& Node, TArray<uint8> State, con
     Entry.State = MoveTemp(State); Entry.Geometry = Measurement;
 }
 
+FMeasurementCache::FLayoutReuse FMeasurementCache::PrepareLayoutReuse(const FLayoutGraph& Snapshot, const FLayoutResult& Layout) const
+{
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_PrepareLayoutMeasurements);
+    FLayoutReuse Reuse;
+    FString Reason;
+    UEdGraph* LiveGraph = Graph.Get();
+    if (Layout.Positions.Num() != Snapshot.Nodes.Num() || Layout.Sizes.Num() != Snapshot.Nodes.Num()) { return Reuse; }
+    bool bChanges = false;
+    for (int32 I = 0; I < Snapshot.Nodes.Num(); ++I)
+    {
+        if (Layout.Positions[I] != Snapshot.Nodes[I].Geometry.Position || Layout.Sizes[I] != Snapshot.Nodes[I].OriginalSize)
+        {
+            bChanges = true; break;
+        }
+    }
+    if (!bChanges || !ValidateMeasurementGraph(LiveGraph, Reason)) { return Reuse; }
+    Reuse.Graph = LiveGraph; Reuse.NodeCount = LiveGraph->Nodes.Num(); Reuse.ContextRevision = ContextRevision;
+    TMap<FGuid, UEdGraphNode*> LiveNodes;
+    LiveNodes.Reserve(Reuse.NodeCount); Reuse.Nodes.Reserve(Reuse.NodeCount);
+    for (UEdGraphNode* Node : LiveGraph->Nodes) { LiveNodes.Add(Node->NodeGuid, Node); }
+    for (int32 I = 0; I < Snapshot.Nodes.Num(); ++I)
+    {
+        const auto& Node = Snapshot.Nodes[I];
+        if (Node.bComment) { continue; }
+        UEdGraphNode* const* Live = LiveNodes.Find(Node.Geometry.Id);
+        if (!Live) { continue; }
+        const TArray<uint8> CurrentState = CaptureMeasurementState(**Live);
+        const FEntry* Entry = Entries.Find(Node.Geometry.Id);
+        if (!Entry || Entry->Node.Get() != *Live || Entry->State != CurrentState) { continue; }
+        FLayoutReuse::FNode& Candidate = Reuse.Nodes.AddDefaulted_GetRef();
+        Candidate.Geometry = Entry->Geometry; Candidate.Geometry.Position = Layout.Positions[I];
+        Candidate.Node = *Live; Candidate.InvariantState = CaptureLayoutInvariantState(**Live);
+    }
+    return Reuse;
+}
+
+void FMeasurementCache::RestoreLayoutReuse(FLayoutReuse Reuse)
+{
+    TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_RestoreLayoutMeasurements);
+    UEdGraph* LiveGraph = Graph.Get();
+    FString Reason;
+    if (Reuse.Nodes.IsEmpty() || Reuse.Graph.Get() != LiveGraph || Reuse.ContextRevision != ContextRevision ||
+        TextRevision != FTextLocalizationManager::Get().GetTextRevision() || StyleIdentity != &FAppStyle::Get() ||
+        !ValidateMeasurementGraph(LiveGraph, Reason) || LiveGraph->Nodes.Num() != Reuse.NodeCount) { return; }
+    TSet<const UEdGraphNode*> LiveNodes;
+    LiveNodes.Reserve(Reuse.NodeCount);
+    for (const UEdGraphNode* Node : LiveGraph->Nodes) { LiveNodes.Add(Node); }
+    for (auto& Candidate : Reuse.Nodes)
+    {
+        UEdGraphNode* Node = Candidate.Node.Get();
+        if (!Node || !LiveNodes.Contains(Node) || Node->NodeGuid != Candidate.Geometry.Id ||
+            FIntPoint(Node->NodePosX, Node->NodePosY) != Candidate.Geometry.Position ||
+            CaptureLayoutInvariantState(*Node) != Candidate.InvariantState) { continue; }
+        TArray<uint8> State = CaptureMeasurementState(*Node);
+        if (Reuse.ContextRevision != ContextRevision || Candidate.Node.Get() != Node) { return; }
+        Store(*Node, MoveTemp(State), Candidate.Geometry);
+    }
+}
+
 TArray<uint8> CaptureMeasurementState(UEdGraphNode& Node)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_MeasurementState);
     TArray<uint8> State;
     FObjectWriter Writer(&Node, State, false, false, false, PPF_DuplicateVerbatim);
-    FString Title = Node.GetNodeTitle(ENodeTitleType::FullTitle).ToString();
-    bool bHasMessage = Node.bHasCompilerMessage;
-    Writer << Title << bHasMessage << Node.ErrorType << Node.ErrorMsg;
-    for (const UEdGraphPin* Pin : Node.Pins)
-    {
-        uint64 Identity = reinterpret_cast<UPTRINT>(Pin);
-        Writer << Identity;
-    }
+    AppendPresentationState(Node, Writer);
     return State;
 }
 }

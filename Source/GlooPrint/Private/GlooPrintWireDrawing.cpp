@@ -76,10 +76,10 @@ void FRouteCache::ObserveContext()
     }
 }
 
-void FRouteCache::Invalidate()
+void FRouteCache::Invalidate(bool bContextChanged)
 {
     if (bStopped) { return; }
-    if (const auto Cache = Measurements.Pin()) { Cache->Invalidate(); }
+    if (const auto Cache = Measurements.Pin()) { Cache->Invalidate(bContextChanged); }
     bReady = false; Routes = {}; Capture.Reset(); Routing.Reset(); ++Revision; AttemptsLeft = 3;
     WireStyle = GetDefault<UGlooPrintSettings>()->GetWireStyle();
     if (WireStyle == EGlooPrintWireStyle::Native)
@@ -173,11 +173,14 @@ bool FRouteCache::Rebuild(float DeltaTime)
     return false;
 }
 
-void FRouteCache::OnGraphChanged(const FEdGraphEditAction& Action) { Invalidate(); }
+void FRouteCache::OnGraphChanged(const FEdGraphEditAction& Action) { Invalidate(false); }
 void FRouteCache::OnModified(UObject* Object)
 {
     UEdGraph* LiveGraph = Graph.Get();
-    if (Object && LiveGraph && (Object == LiveGraph || Object->IsIn(LiveGraph) || LiveGraph->IsIn(Object))) { Invalidate(); }
+    if (Object && LiveGraph && (Object == LiveGraph || Object->IsIn(LiveGraph) || LiveGraph->IsIn(Object)))
+    {
+        Invalidate(!Object->IsA<UEdGraphNode>());
+    }
 }
 void FRouteCache::OnPropertyChanged(UObject* Object, FPropertyChangedEvent& Event)
 {

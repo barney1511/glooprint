@@ -58,13 +58,16 @@ public:
             Before = SerializeNodes(*Fixture->Graph);
             const auto NativeComment = Panel->GetNodeWidgetFromGuid(Comment->NodeGuid);
             const auto OriginalWidgetReference = Comment->DEPRECATED_NodeWidget;
-            FormatQueue = GEditor->Trans->GetQueueLength();
+            const int32 PlanningQueue = GEditor->Trans->GetQueueLength();
+            FormatQueue = PlanningQueue - GEditor->Trans->GetUndoCount();
+            Test.AddInfo(FString::Printf(TEXT("Validated format starts with %d applied transactions and %d redo entries."),
+                FormatQueue, GEditor->Trans->GetUndoCount()));
             const bool bDirty = Fixture->Graph->GetOutermost()->IsDirty();
             if (!Test.TestTrue(TEXT("Build read-only layout and routing plan"),
                 PlanFormatGraph(Fixture->Graph, Scale, {Fixture->Branch->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return Finish(); }
             Test.TestTrue(TEXT("Planning preserves every serialized node/pin value"), Before == SerializeNodes(*Fixture->Graph));
             Test.TestEqual(TEXT("Planning never creates or removes graph nodes"), Fixture->Graph->Nodes.Num(), 3);
-            Test.TestEqual(TEXT("Planning creates no transaction"), GEditor->Trans->GetQueueLength(), FormatQueue);
+            Test.TestEqual(TEXT("Planning creates no transaction"), GEditor->Trans->GetQueueLength(), PlanningQueue);
             Test.TestEqual(TEXT("Planning preserves dirty state"), Fixture->Graph->GetOutermost()->IsDirty(), bDirty);
             Test.TestTrue(TEXT("Proposed title measurement preserves live widget identity"), Comment->DEPRECATED_NodeWidget == OriginalWidgetReference &&
                 Panel->GetNodeWidgetFromGuid(Comment->NodeGuid) == NativeComment);

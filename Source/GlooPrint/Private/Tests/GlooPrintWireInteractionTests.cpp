@@ -83,6 +83,34 @@ public:
             Before = SerializeNodes(*Fixture->Graph); Builds = Cache->GetBuildCount();
             Test.TestEqual(TEXT("All original shared-input connections have custom routes"), Cache->GetRoutes().Wires.Num(), 3);
             Test.TestEqual(TEXT("Gesture fixture has no native routing fallback"), Cache->GetRoutes().FallbackCount, 0);
+            if (Cache->GetRoutes().FallbackCount > 0)
+            {
+                FLayoutGraph Cold; FRouteSet ColdRoutes; FString Reason;
+                const float Scale = Window->GetDPIScaleFactor() * Slate.GetApplicationScale();
+                if (CaptureGraphForRouting(Fixture->Graph, Scale, Cold, Reason) && ComputeRoutes(Cold, ColdRoutes, Reason, Style))
+                {
+                    Test.AddInfo(FString::Printf(TEXT("Before any F or gesture: live fallbacks=%d; independent cold fallbacks=%d."),
+                        Cache->GetRoutes().FallbackCount, ColdRoutes.FallbackCount));
+                    for (const auto& Pair : ColdRoutes.Wires)
+                    {
+                        if (Pair.Value.Fallback == ERouteFallback::None) { continue; }
+                        Test.AddInfo(FString::Printf(TEXT("Cold fallback %s:%s -> %s:%s, reason=%d"),
+                            *Pair.Key.FromNode.ToString(), *Pair.Key.FromPin.ToString(), *Pair.Key.ToNode.ToString(), *Pair.Key.ToPin.ToString(), int32(Pair.Value.Fallback)));
+                    }
+                    for (const auto& Node : Cold.Nodes)
+                    {
+                        Test.AddInfo(FString::Printf(TEXT("Cold node %s at (%d,%d), body (%.2f,%.2f)"), *Node.Geometry.Id.ToString(),
+                            Node.Geometry.Position.X, Node.Geometry.Position.Y, Node.Geometry.BodySize.X, Node.Geometry.BodySize.Y));
+                    }
+                }
+                else { Test.AddInfo(TEXT("Cold routing diagnostic: ") + Reason); }
+                TArray<FColor> Pixels; FIntVector Size;
+                if (Slate.TakeScreenshot(Editor.ToSharedRef(), Pixels, Size))
+                {
+                    TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
+                    FFileHelper::SaveArrayToFile(Png, *(FPaths::ProjectSavedDir() / TEXT("GlooPrint-WireGestureFailure.png")));
+                }
+            }
             if (!HoverEndpoint(*Panel, *Cache, true)) { return Finish(); }
             return Next(1);
         }

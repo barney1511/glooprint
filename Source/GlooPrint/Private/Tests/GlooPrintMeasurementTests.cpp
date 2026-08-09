@@ -303,6 +303,71 @@ bool FMixedCacheContinuationTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLayoutMeasurementReuseTest, "GlooPrint.Measurement.LayoutReuse",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FLayoutMeasurementReuseTest::RunTest(const FString& Parameters)
+{
+    enum class ECallback { None, PinEdit, Reconstruct, ContextChange };
+    for (const auto Callback : {ECallback::None, ECallback::PinEdit, ECallback::Reconstruct, ECallback::ContextChange})
+    {
+        FFixture Fixture;
+        const TSharedPtr<FMeasurementCache> Cache = MakeShared<FMeasurementCache>();
+        FMeasurementOptions Options; Options.Cache = Cache.Get();
+        const auto Before = SerializeNodes(*Fixture.Graph);
+        const int32 QueueBefore = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
+        bool bNotified = false;
+        const auto Handle = Fixture.Graph->AddOnGraphChangedHandler(FOnGraphChanged::FDelegate::CreateLambda(
+            [&](const FEdGraphEditAction&)
+            {
+                if (bNotified) { return; }
+                bNotified = true;
+                if (Callback == ECallback::PinEdit)
+                {
+                    Fixture.Print->FindPinChecked(TEXT("InString"))->DefaultValue += TEXT(" updated by graph observer with a longer default");
+                }
+                else if (Callback == ECallback::Reconstruct) { Fixture.Print->ReconstructNode(); }
+                else if (Callback == ECallback::ContextChange) { Cache->Invalidate(); }
+            }));
+        FString Reason;
+        int32 Changed = 0;
+        const bool bFormatted = FormatGraph(Fixture.Graph, 1, {Fixture.Branch->NodeGuid}, Changed, Reason, Options);
+        Fixture.Graph->RemoveOnGraphChangedHandler(Handle);
+        if (!TestTrue(TEXT("Native format with reusable measurements succeeds"), bFormatted)) { AddError(Reason); return false; }
+        TestTrue(TEXT("Format moved nodes and retained the normal graph notification"), Changed > 0 && bNotified);
+        if (Callback == ECallback::None)
+        {
+            TestEqual(TEXT("Only ordinary native measurements survive the layout boundary"), Cache->GetEntryCount(), Fixture.Graph->Nodes.Num() - 1);
+            TestEqual(TEXT("Reuse does not add a transaction"), GEditor->Trans->GetQueueLength(), QueueBefore + 1);
+        }
+        else if (Callback == ECallback::ContextChange)
+        {
+            TestEqual(TEXT("Explicit context invalidation prevents every staged restoration"), Cache->GetEntryCount(), 0);
+        }
+        else
+        {
+            TestFalse(TEXT("Callback-edited or reconstructed node cannot regain old geometry"),
+                Cache->Find(*Fixture.Print, CaptureMeasurementState(*Fixture.Print)) != nullptr);
+        }
+        FGraphMeasurement Reused, Cold;
+        if (!TestTrue(TEXT("Live post-notification geometry measures"), MeasureGraph(Fixture.Graph, 1, Reused, Reason, Options))) { AddError(Reason); return false; }
+        if (Callback == ECallback::None)
+        {
+            TestEqual(TEXT("Only the resized comment needs native remeasurement"), Cache->GetMisses(), 1);
+        }
+        if (TestTrue(TEXT("Independent cold post-notification geometry measures"), MeasureGraph(Fixture.Graph, 1, Cold, Reason))) { Compare(*this, Cold, Reused); }
+        else { AddError(Reason); return false; }
+        if (Callback == ECallback::None)
+        {
+            const auto After = SerializeNodes(*Fixture.Graph);
+            TestTrue(TEXT("Layout reuse preserves native undo"), GEditor->UndoTransaction());
+            TestTrue(TEXT("One undo restores exact original values"), Before == SerializeNodes(*Fixture.Graph));
+            TestTrue(TEXT("Layout reuse preserves native redo"), GEditor->RedoTransaction());
+            TestTrue(TEXT("Redo restores exact formatted values"), After == SerializeNodes(*Fixture.Graph));
+        }
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGraphSnapshotTest, "GlooPrint.Editor.AnchorRulesAndConnectionValidation",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

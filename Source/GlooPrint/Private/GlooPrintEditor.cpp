@@ -324,9 +324,13 @@ bool PlanFormatGraph(UEdGraph* Graph, float LayoutScale, const TSet<FGuid>& Sele
     return Job.TakePlan(OutPlan, OutReason, OutNeedsLayoutRetry);
 }
 
-static bool ApplyFormatPlan(UEdGraph* Graph, const FFormatPlan& Plan, int32& ChangedNodes, FString& OutReason)
+static bool ApplyFormatPlan(UEdGraph* Graph, const FFormatPlan& Plan, int32& ChangedNodes, FString& OutReason,
+    FMeasurementCache* MeasurementCache = nullptr)
 {
+    const TSharedPtr<FMeasurementCache> Cache = MeasurementCache ? MeasurementCache->AsShared() : TSharedPtr<FMeasurementCache>();
+    auto Reuse = Cache ? Cache->PrepareLayoutReuse(Plan.Snapshot, Plan.Layout) : FMeasurementCache::FLayoutReuse();
     if (!ApplyLayout(Graph, Plan.Snapshot, Plan.Layout, ChangedNodes, OutReason)) { return false; }
+    if (Cache && ChangedNodes > 0) { Cache->RestoreLayoutReuse(MoveTemp(Reuse)); }
     if (Plan.Layout.bLimitedComments) { OutReason = TEXT("Overlapping comment regions kept their internal arrangement."); }
     if (Plan.Routes.FallbackCount > 0 && GetDefault<UGlooPrintSettings>()->GetWireStyle() != EGlooPrintWireStyle::Native)
     {
@@ -343,7 +347,7 @@ bool FormatGraph(UEdGraph* Graph, float LayoutScale, const TSet<FGuid>& Selectio
     ChangedNodes = 0;
     FFormatPlan Plan;
     if (!PlanFormatGraph(Graph, LayoutScale, Selection, Plan, OutReason, MeasurementOptions, OutNeedsLayoutRetry)) { return false; }
-    return ApplyFormatPlan(Graph, Plan, ChangedNodes, OutReason);
+    return ApplyFormatPlan(Graph, Plan, ChangedNodes, OutReason, MeasurementOptions.Cache);
 }
 
 class FCommands final : public TCommands<FCommands>
@@ -569,7 +573,11 @@ void FEditor::ContinueRequest(FPendingFormat Request, double Deadline)
         {
             bSuccess = false; Reason = TEXT("Formatting canceled because the graph, selection or display changed.");
         }
-        else { bSuccess = ApplyFormatPlan(Request.Graph.Get(), Plan, Changed, Reason); }
+        else
+        {
+            const auto Cache = Request.Cache.Pin();
+            bSuccess = ApplyFormatPlan(Request.Graph.Get(), Plan, Changed, Reason, Cache.Get());
+        }
     }
     else if (bNeedsRetry) { Reason = TEXT("Geometry is still unavailable after three deferred attempts. ") + Reason; }
     CloseProgress(); ReportFormatResult(bSuccess, Changed, Reason);

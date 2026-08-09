@@ -21,7 +21,7 @@ public:
     void Initialize(TSharedRef<SGraphPanel> InPanel);
     void Shutdown();
     void ObserveContext();
-    void Invalidate();
+    void Invalidate(bool bContextChanged = true);
     const FRouteSet& GetRoutes() const { return Routes; }
     bool IsReady() const { return bReady; }
     int32 GetBuildCount() const { return BuildCount; }
