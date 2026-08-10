@@ -102,6 +102,7 @@ public:
         Csv += FString::Printf(TEXT("%s,%d,%d,%d,%d,%.6f,%.6f,%.6f,%d,%d,%d,%d,%llu\n"),
             *Family, Graph.Nodes.Num(), Graph.Pins.Num(), Graph.Edges.Num(), Sample,
             LayoutMs, RouteMs, LayoutMs + RouteMs, Routes.FallbackCount, Bends, Curves, Expanded, RouteBytes);
+        if (Sample == 0 && FParse::Param(FCommandLine::Get(), TEXT("GlooPrintBenchmarkRouteDetails"))) { SaveRouteDetails(Layout, Routes); }
         if (Sample > 0)
         {
             LayoutTimes.Add(LayoutMs); RouteTimes.Add(RouteMs); TotalTimes.Add(LayoutMs + RouteMs);
@@ -133,6 +134,34 @@ public:
         return true;
     }
 private:
+    void SaveRouteDetails(const FLayoutResult& Layout, const FRouteSet& Routes)
+    {
+        FString Nodes = TEXT("node,x,y,width,height\n");
+        for (int32 I = 0; I < Graph.Nodes.Num(); ++I)
+        {
+            const auto& Size = Graph.Nodes[I].Geometry.BodySize;
+            Nodes += FString::Printf(TEXT("%d,%d,%d,%.3f,%.3f\n"), I, Layout.Positions[I].X, Layout.Positions[I].Y, Size.X, Size.Y);
+        }
+        FString Details = TEXT("edge,from_node,to_node,from_pin,to_pin,start_x,start_y,end_x,end_y,method,fallback,expansions,segment_checks,x_channels,y_channels,length,bends,points\n");
+        for (int32 I = 0; I < Graph.Edges.Num(); ++I)
+        {
+            const auto& Edge = Graph.Edges[I]; const auto& From = Graph.Pins[Edge.From]; const auto& To = Graph.Pins[Edge.To];
+            const auto& Route = Routes.Wires.FindChecked({Graph.Nodes[From.Node].Geometry.Id, From.Id, Graph.Nodes[To.Node].Geometry.Id, To.Id});
+            const FVector2f Start = FVector2f(Layout.Positions[From.Node]) + From.Offset.GetValue();
+            const FVector2f End = FVector2f(Layout.Positions[To.Node]) + To.Offset.GetValue();
+            FString Points;
+            for (auto Point : Route.Points) { Points += FString::Printf(TEXT("%.3f:%.3f;"), Point.X, Point.Y); }
+            Details += FString::Printf(TEXT("%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%d,%s\n"),
+                I, From.Node, To.Node, From.Ordinal, To.Ordinal, Start.X, Start.Y, End.X, End.Y, int32(Route.Method), int32(Route.Fallback),
+                Route.Search.ExpandedStates, Route.Search.SegmentChecks, Route.Search.XChannels, Route.Search.YChannels,
+                Route.Length, FMath::Max(0, Route.Points.Num() - 2), *Points);
+        }
+        const FString Directory = FPaths::ProjectSavedDir() / TEXT("GlooPrintBenchmarks");
+        IFileManager::Get().MakeDirectory(*Directory, true);
+        const FString Prefix = Directory / FString::Printf(TEXT("%d-%s"), Graph.Nodes.Num(), *Family);
+        Test.TestTrue(TEXT("Save diagnostic node positions"), FFileHelper::SaveStringToFile(Nodes, *(Prefix + TEXT("-nodes.csv"))));
+        Test.TestTrue(TEXT("Save diagnostic route paths"), FFileHelper::SaveStringToFile(Details, *(Prefix + TEXT("-routes.csv"))));
+    }
     FAutomationTestBase& Test;
     FString Family;
     FLayoutGraph Graph;

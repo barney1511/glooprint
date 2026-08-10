@@ -286,6 +286,40 @@ bool FRoutingPinApproachTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoutingShiftedTurnsTest, "GlooPrint.Routing.ShiftedTerminalTurns",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoutingShiftedTurnsTest::RunTest(const FString& Parameters)
+{
+    FLayoutGraph Graph;
+    const int32 Source = RouteNode(Graph, {0, 0}, {100, 240});
+    const int32 SecondOut = Graph.Pins.Add({FGuid(0, 0, 1, 3), Source, 2, true, ELinkKind::Execution, FVector2f(100, 64)});
+    ++Graph.Nodes[Source].PinCount;
+    const int32 Target = RouteNode(Graph, {800, 0}, {100, 240});
+    const int32 SecondIn = Graph.Pins.Add({FGuid(0, 0, 2, 3), Target, 2, false, ELinkKind::Execution, FVector2f(0, 64)});
+    ++Graph.Nodes[Target].PinCount;
+    RouteLink(Graph, Source, Target);
+    Graph.Edges.Add({SecondOut, SecondIn, ELinkKind::Execution});
+    const FRouteKey Key{Graph.Nodes[Source].Geometry.Id, Graph.Pins[SecondOut].Id, Graph.Nodes[Target].Geometry.Id, Graph.Pins[SecondIn].Id};
+    RouteNode(Graph, {350, -60}, {100, 360});
+    RouteNode(Graph, {-200, 260}, {1400, 100});
+    for (auto Style : {EGlooPrintWireStyle::Rounded90, EGlooPrintWireStyle::Diagonal45})
+    {
+        FRouteSet Routes; FString Reason;
+        if (!TestTrue(TEXT("Shifted terminal fixture computes"), ComputeRoutes(Graph, Routes, Reason, Style))) { AddError(Reason); return false; }
+        TestEqual(TEXT("Both original connections retain custom paths"), Routes.FallbackCount, 0);
+        TestEqual(TEXT("Both original pin pairs remain"), Routes.Wires.Num(), 2);
+        const auto& Route = Routes.Wires[Key];
+        TestTrue(TEXT("Clear four-bend detour avoids grid search"), Route.Method == ERouteMethod::Simple && Route.Search.ExpandedStates == 0);
+        TestEqual(TEXT("The detour needs only four bends"), Route.Points.Num(), 6);
+        for (const auto& Pair : Routes.Wires) { CheckClear(*this, Graph, Pair.Value); }
+        Swap(Graph.Edges[0], Graph.Edges[1]);
+        FRouteSet Cold;
+        TestTrue(TEXT("Cold shuffled detours compute"), ComputeRoutes(Graph, Cold, Reason, Style));
+        for (const auto& Pair : Routes.Wires) { TestTrue(TEXT("Shuffled detours keep identical paths"), Cold.Wires[Pair.Key].Points == Pair.Value.Points); }
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoutingDenseFanTest, "GlooPrint.Routing.DenseFanCorridors",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FRoutingDenseFanTest::RunTest(const FString& Parameters)

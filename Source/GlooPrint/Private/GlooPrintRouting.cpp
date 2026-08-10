@@ -651,6 +651,33 @@ void FRoutingJob::FState::RouteOne(int32 Index)
             }
             if (!bFound)
             {
+                TArray<float> Departures, Approaches;
+                for (float X : XChannels)
+                {
+                    if (X >= Exit.X && ClearSegment(Exit, {X, Exit.Y}, false, false)) { Departures.Add(X); }
+                    if (X <= Entry.X && ClearSegment({X, Entry.Y}, Entry, false, false)) { Approaches.Add(X); }
+                }
+                for (float Y : YChannels)
+                {
+                    TOptional<float> Departure, Approach;
+                    for (float X : Departures)
+                    {
+                        if (ClearSegment({X, Exit.Y}, {X, Y}, false, false)) { Departure = X; break; }
+                    }
+                    if (!Departure.IsSet()) { continue; }
+                    for (float X : Approaches)
+                    {
+                        if (ClearSegment({X, Y}, {X, Entry.Y}, false, false)) { Approach = X; break; }
+                    }
+                    if (Approach.IsSet() && Accept({Start, Exit, {Departure.GetValue(), Exit.Y},
+                        {Departure.GetValue(), Y}, {Approach.GetValue(), Y}, {Approach.GetValue(), Entry.Y}, Entry, End}))
+                    {
+                        bFound = true; break;
+                    }
+                }
+            }
+            if (!bFound)
+            {
                 SearchWork.X = XChannels; SearchWork.Y = YChannels;
                 for (const auto& O : Obstacles.Items)
                 {
