@@ -41,6 +41,7 @@ public:
             Target = Output->LinkedTo[0]->GetOwningNode();
             Target->SetPosition({700, 280}); Fixture->Print->SetPosition({320, 30});
             Extra = Fixture->Add<UK2Node_IfThenElse>({800, -160});
+            for (int32 I = 0; I < Fixture->Graph->Nodes.Num(); ++I) { Fixture->Graph->Nodes[I]->NodeGuid = FGuid(0, 0, 0, I + 1); }
             if (!Test.TestTrue(TEXT("Native schema accepts a second independent wire at the shared execution input"),
                 GetDefault<UEdGraphSchema_K2>()->TryCreateConnection(Fixture->Branch->FindPinChecked(UEdGraphSchema_K2::PN_Else), InputPin()))) { return Finish(); }
             Key = {Fixture->Branch->NodeGuid, Output->PinId, Target->NodeGuid, InputPin()->PinId};
@@ -93,9 +94,16 @@ public:
                         Cache->GetRoutes().FallbackCount, ColdRoutes.FallbackCount));
                     for (const auto& Pair : ColdRoutes.Wires)
                     {
-                        if (Pair.Value.Fallback == ERouteFallback::None) { continue; }
-                        Test.AddInfo(FString::Printf(TEXT("Cold fallback %s:%s -> %s:%s, reason=%d"),
+                        Test.AddInfo(FString::Printf(TEXT("Cold route %s:%s -> %s:%s, reason=%d"),
                             *Pair.Key.FromNode.ToString(), *Pair.Key.FromPin.ToString(), *Pair.Key.ToNode.ToString(), *Pair.Key.ToPin.ToString(), int32(Pair.Value.Fallback)));
+                        for (const auto& Point : Pair.Value.Points) { Test.AddInfo(FString::Printf(TEXT("Route point (%.3f,%.3f)"), Point.X, Point.Y)); }
+                    }
+                    for (const auto& Pin : Cold.Pins)
+                    {
+                        if (!Pin.Offset.IsSet()) { continue; }
+                        const FVector2f Point = FVector2f(Cold.Nodes[Pin.Node].Geometry.Position) + Pin.Offset.GetValue();
+                        Test.AddInfo(FString::Printf(TEXT("Cold pin %s:%s at (%.3f,%.3f)"),
+                            *Cold.Nodes[Pin.Node].Geometry.Id.ToString(), *Pin.Id.ToString(), Point.X, Point.Y));
                     }
                     for (const auto& Node : Cold.Nodes)
                     {
@@ -599,7 +607,20 @@ private:
         const FPointerEvent Event(FSlateApplication::CursorPointerIndex, Mouse, Previous, Slate.GetPressedMouseButtons(), EKeys::Invalid, 0, Slate.GetModifierKeys());
         Slate.ProcessMouseMoveEvent(Event, false);
         const FWidgetPath Path(Window->GetHittestGrid().GetBubblePath(Mouse, 0, false, 0));
-        Test.TestTrue(TEXT("Native mouse processing reaches the painted graph"), Path.ContainsWidget(&Panel) && Panel.IsHovered());
+        if (!Test.TestTrue(TEXT("Native mouse processing reaches the painted graph"), Path.ContainsWidget(&Panel) && Panel.IsHovered()))
+        {
+            Test.AddInfo(FString::Printf(TEXT("Mouse (%.3f,%.3f), graph in path=%d, hovered=%d, path widgets=%d"),
+                Mouse.X, Mouse.Y, Path.ContainsWidget(&Panel), Panel.IsHovered(), Path.Widgets.Num()));
+            for (int32 I = 0; I < Path.Widgets.Num(); ++I) { Test.AddInfo(TEXT("Hit widget: ") + Path.Widgets[I].Widget->GetTypeAsString()); }
+            const auto Located = Slate.LocateWindowUnderMouse(Mouse, Slate.GetInteractiveTopLevelWindows(), false, Event.GetUserIndex());
+            Test.AddInfo(FString::Printf(TEXT("Native located graph=%d, user=%d, native window matches=%d"),
+                Located.ContainsWidget(&Panel), Event.GetUserIndex(), Slate.GetPlatformApplication()->GetWindowUnderCursor() == Window->GetNativeWindow()));
+            TArray<TSharedRef<SWindow>> Visible; Slate.GetAllVisibleWindowsOrdered(Visible);
+            for (const auto& Candidate : Visible)
+            {
+                Test.AddInfo(FString::Printf(TEXT("Visible window %s, contains mouse=%d"), *Candidate->GetTitle().ToString(), Candidate->GetRectInScreen().ContainsPoint(Mouse)));
+            }
+        }
     }
     void ShiftClick(SGraphPanel& Panel)
     {
