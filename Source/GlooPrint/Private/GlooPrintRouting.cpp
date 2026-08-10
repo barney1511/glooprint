@@ -370,6 +370,7 @@ struct FRoutingJob::FState
         FVector2f A, B;
         int32 From, To;
         bool bFirst, bLast;
+        bool bPinApproach = false;
     };
     struct FPinTurns
     {
@@ -390,6 +391,7 @@ struct FRoutingJob::FState
     FChannelCoordinates BodyX, BodyMinY, BodyMaxY, ReservedX, ReservedY;
     TArray<int32> Order, FanOut, FanIn;
     TArray<FReservedSegment> Reserved;
+    TBitArray<> PendingPinApproaches;
     FObstacles ReservedHorizontal, ReservedVertical;
     FSearchScratch SearchWork;
     TArray<FPinTurns> PinTurns;
@@ -406,9 +408,11 @@ struct FRoutingJob::FState
         Result.Wires.Reserve(Graph.Edges.Num());
         FanOut.Init(0, Graph.Pins.Num()); FanIn.Init(0, Graph.Pins.Num());
         PinTurns.SetNum(Graph.Pins.Num());
+        PendingPinApproaches.Init(false, Graph.Pins.Num());
     }
     bool AddNode(int32 I);
     bool AddEdge(int32 I);
+    FVector2f TerminalEnd(int32 Pin, FVector2f Attachment, bool bOutput) const;
     void RouteOne(int32 Index);
     void Step();
 };
@@ -451,8 +455,28 @@ bool FRoutingJob::FState::AddEdge(int32 I)
             Reason = TEXT("Routing requires every linked pin attachment."); return false;
         }
     }
+    for (int32 PinIndex : {E.From, E.To})
+    {
+        if (PendingPinApproaches[PinIndex]) { continue; }
+        PendingPinApproaches[PinIndex] = true;
+        const auto& Pin = Graph.Pins[PinIndex];
+        const bool bOutput = PinIndex == E.From;
+        const FVector2f Attachment = FVector2f(Graph.Nodes[Pin.Node].Geometry.Position) + Pin.Offset.GetValue();
+        const FVector2f Terminal = TerminalEnd(PinIndex, Attachment, bOutput);
+        if (!Obstacles.ClearLine(Attachment, Terminal, Pin.Node)) { continue; }
+        const int32 Id = Reserved.Add({Attachment, Terminal, bOutput ? PinIndex : INDEX_NONE,
+            bOutput ? INDEX_NONE : PinIndex, bOutput, !bOutput, true});
+        ReservedHorizontal.Add(FBox2f(TArray<FVector2f>{Attachment, Terminal}).ExpandBy(WireLaneSpacing), Id);
+    }
     Order.Add(I);
     return true;
+}
+
+FVector2f FRoutingJob::FState::TerminalEnd(int32 Pin, FVector2f Attachment, bool bOutput) const
+{
+    const auto& Body = Bodies[Graph.Pins[Pin].Node];
+    return {bOutput ? FMath::Max(Attachment.X + ExitLength, Body.Max.X + CornerRadius)
+                    : FMath::Min(Attachment.X - ExitLength, Body.Min.X - CornerRadius), Attachment.Y};
 }
 
 void FRoutingJob::FState::Step()
@@ -521,8 +545,8 @@ void FRoutingJob::FState::RouteOne(int32 Index)
     const FVector2f End = FVector2f(Graph.Nodes[To.Node].Geometry.Position) + To.Offset.GetValue();
     const float OutLane = FMath::Min(FanOut[Edge.From]++, 64) * WireLaneSpacing;
     const float InLane = FMath::Min(FanIn[Edge.To]++, 64) * WireLaneSpacing;
-    const FVector2f Exit(FMath::Max(Start.X + ExitLength, Bodies[From.Node].Max.X + CornerRadius), Start.Y);
-    const FVector2f Entry(FMath::Min(End.X - ExitLength, Bodies[To.Node].Min.X - CornerRadius), End.Y);
+    const FVector2f Exit = TerminalEnd(Edge.From, Start, true);
+    const FVector2f Entry = TerminalEnd(Edge.To, End, false);
     auto ClearSegment = [&](FVector2f A, FVector2f B, bool bFirst, bool bLast)
     {
         TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_ClearRouteSegment);
@@ -534,6 +558,7 @@ void FRoutingJob::FState::RouteOne(int32 Index)
         return Reservations.Query(FBox2f(TArray<FVector2f>{A, B}), [&](int32 ReservedId)
         {
             const auto& R = Reserved[Reservations.Items[ReservedId].Node];
+            if (R.bPinApproach && !PendingPinApproaches[R.bFirst ? R.From : R.To]) { return true; }
             if (A.Y == B.Y && R.A.Y == R.B.Y &&
                 ((R.bFirst && Edge.From == R.From && A.Y == Start.Y && FMath::Min(A.X, B.X) >= Start.X) ||
                  (R.bLast && Edge.To == R.To && A.Y == End.Y && FMath::Max(A.X, B.X) <= End.X))) { return true; }
@@ -740,6 +765,7 @@ void FRoutingJob::FState::RouteOne(int32 Index)
         Route.StartRegion = bStartClear ? StartRegion : FBox2f(Start, Start);
         Route.EndRegion = bEndClear ? EndRegion : FBox2f(End, End);
         Route.Bounds += Route.StartRegion; Route.Bounds += Route.EndRegion;
+        PendingPinApproaches[Edge.From] = false; PendingPinApproaches[Edge.To] = false;
         bool bFirstTurn = true;
         for (int32 I = 1; I < Route.Points.Num(); ++I)
         {

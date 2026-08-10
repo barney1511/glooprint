@@ -235,6 +235,57 @@ bool FRoutingSharedTerminalTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoutingPinApproachTest, "GlooPrint.Routing.ReservedPinApproaches",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoutingPinApproachTest::RunTest(const FString& Parameters)
+{
+    for (auto Style : {EGlooPrintWireStyle::Rounded90, EGlooPrintWireStyle::Diagonal45})
+    for (bool bReturnFirst : {false, true})
+    {
+        FLayoutGraph Graph;
+        const int32 Branch = RouteNode(Graph, {0, 0}, {200, 96});
+        Graph.Pins[1].Offset = FVector2f(200, 43);
+        const int32 Else = Graph.Pins.Add({FGuid(0, 0, 1, 3), Branch, 2, true, ELinkKind::Execution, FVector2f(200, 75)});
+        ++Graph.Nodes[Branch].PinCount;
+        const int32 Sequence = RouteNode(Graph, {700, 280}, {140, 124});
+        const int32 Print = RouteNode(Graph, {320, 30}, {290, 356});
+        for (int32 Pin : {Graph.Nodes[Sequence].FirstPin, Graph.Nodes[Sequence].FirstPin + 1, Graph.Nodes[Print].FirstPin})
+        {
+            auto Offset = Graph.Pins[Pin].Offset.GetValue(); Offset.Y = 43; Graph.Pins[Pin].Offset = Offset;
+        }
+        if (bReturnFirst) { Swap(Graph.Nodes[Branch].Geometry.Id, Graph.Nodes[Sequence].Geometry.Id); }
+        RouteLink(Graph, Branch, Sequence);
+        Graph.Edges.Add({Else, Graph.Nodes[Sequence].FirstPin, ELinkKind::Execution});
+        const auto Return = RouteLink(Graph, Sequence, Print);
+        FRouteSet Routes; FString Reason;
+        if (!TestTrue(TEXT("Nearby pin approaches compute"), ComputeRoutes(Graph, Routes, Reason, Style))) { AddError(Reason); return false; }
+        TestEqual(TEXT("Route order cannot strand the nearby return input"), Routes.FallbackCount, 0);
+        TestEqual(TEXT("Every original connection has its own route"), Routes.Wires.Num(), 3);
+        for (const auto& Pair : Routes.Wires) { CheckClear(*this, Graph, Pair.Value); }
+        const auto& Back = Routes.Wires[Return].Points;
+        for (const auto& Pair : Routes.Wires)
+        {
+            if (Pair.Key == Return) { continue; }
+            const auto& Forward = Pair.Value.Points;
+            for (int32 A = 1; A < Back.Num(); ++A)
+            for (int32 B = 1; B < Forward.Num(); ++B)
+            {
+                if (Back[A].Y == Back[A - 1].Y && Forward[B].Y == Forward[B - 1].Y &&
+                    FMath::Min(Back[A].X, Back[A - 1].X) < FMath::Max(Forward[B].X, Forward[B - 1].X) &&
+                    FMath::Max(Back[A].X, Back[A - 1].X) > FMath::Min(Forward[B].X, Forward[B - 1].X))
+                {
+                    TestTrue(TEXT("Distinct parallel wires retain lane spacing"), FMath::Abs(Back[A].Y - Forward[B].Y) >= 12);
+                }
+            }
+        }
+        Swap(Graph.Edges[0], Graph.Edges[2]);
+        FRouteSet Cold;
+        TestTrue(TEXT("Cold shuffled pin approaches compute"), ComputeRoutes(Graph, Cold, Reason, Style));
+        for (const auto& Pair : Routes.Wires) { TestTrue(TEXT("Shuffling preserves each route"), Cold.Wires[Pair.Key].Points == Pair.Value.Points); }
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoutingDenseFanTest, "GlooPrint.Routing.DenseFanCorridors",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FRoutingDenseFanTest::RunTest(const FString& Parameters)

@@ -14,6 +14,7 @@ public class GlooPrint : ModuleRules
         {
             PrivateDependencyModuleNames.AddRange(new[] { "Kismet", "AnimGraph" });
             PrivateDependencyModuleNames.Add("AutomationDriver");
+            PrivateDependencyModuleNames.Add("ApplicationCore");
         }
     }
 }

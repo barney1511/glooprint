@@ -7,6 +7,7 @@
 #include "Editor/Transactor.h"
 #include "Framework/Application/SlateApplication.h"
 #include "GenericPlatform/GenericApplication.h"
+#include "HAL/PlatformApplicationMisc.h"
 #include "ImageUtils.h"
 #include "IAutomationDriver.h"
 #include "IAutomationDriverModule.h"
@@ -31,6 +32,20 @@ public:
     virtual bool Update() override
     {
         auto& Slate = FSlateApplication::Get();
+        if (!bRequestedActivation)
+        {
+            FPlatformApplicationMisc::ActivateApplication(); bRequestedActivation = true;
+            ActivationDeadline = FPlatformTime::Seconds() + 10;
+            return false;
+        }
+        if (!Fixture && !FPlatformApplicationMisc::IsThisApplicationForeground())
+        {
+            if (FPlatformTime::Seconds() > ActivationDeadline)
+            {
+                Test.AddError(TEXT("Editor could not become foreground for native pointer verification.")); return Finish();
+            }
+            return false;
+        }
         if (!Fixture)
         {
             OriginalStyle = GetDefault<UGlooPrintSettings>()->WireStyle;
@@ -48,6 +63,7 @@ public:
             Editor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(true);
             Window = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint wire gestures"))).ClientSize(FVector2f(1300, 1000))[Editor.ToSharedRef()];
             Slate.AddWindow(Window.ToSharedRef());
+            Window->BringToFront(true);
             auto& Module = IAutomationDriverModule::Get();
             if (!Test.TestFalse(TEXT("No other input driver is active in the disposable fixture"), Module.IsEnabled())) { return Finish(); }
             Module.Enable(); bOwnDriver = true;
@@ -112,12 +128,14 @@ public:
                     }
                 }
                 else { Test.AddInfo(TEXT("Cold routing diagnostic: ") + Reason); }
-                TArray<FColor> Pixels; FIntVector Size;
-                if (Slate.TakeScreenshot(Editor.ToSharedRef(), Pixels, Size))
-                {
-                    TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
-                    FFileHelper::SaveArrayToFile(Png, *(FPaths::ProjectSavedDir() / TEXT("GlooPrint-WireGestureFailure.png")));
-                }
+            }
+            TArray<FColor> Pixels; FIntVector Size;
+            if (Test.TestTrue(TEXT("Capture initial native routed wires"), Slate.TakeScreenshot(Editor.ToSharedRef(), Pixels, Size)))
+            {
+                TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
+                const FString Name = FString::Printf(TEXT("GlooPrint-WireGestureInitial-%s.png"),
+                    Style == EGlooPrintWireStyle::Rounded90 ? TEXT("rounded") : TEXT("diagonal"));
+                Test.TestTrue(TEXT("Save initial native routed wires"), FFileHelper::SaveArrayToFile(Png, *(FPaths::ProjectSavedDir() / Name)));
             }
             if (!HoverEndpoint(*Panel, *Cache, true)) { return Finish(); }
             return Next(1);
@@ -615,6 +633,8 @@ private:
             const auto Located = Slate.LocateWindowUnderMouse(Mouse, Slate.GetInteractiveTopLevelWindows(), false, Event.GetUserIndex());
             Test.AddInfo(FString::Printf(TEXT("Native located graph=%d, user=%d, native window matches=%d"),
                 Located.ContainsWidget(&Panel), Event.GetUserIndex(), Slate.GetPlatformApplication()->GetWindowUnderCursor() == Window->GetNativeWindow()));
+            Test.AddInfo(FString::Printf(TEXT("Window visible=%d, accepts input=%d, native point within=%d, cursor radius=%.3f"),
+                Window->IsVisible(), Window->AcceptsInput(), Window->IsScreenspaceMouseWithin(Mouse), Slate.GetCursorRadius()));
             TArray<TSharedRef<SWindow>> Visible; Slate.GetAllVisibleWindowsOrdered(Visible);
             for (const auto& Candidate : Visible)
             {
@@ -663,6 +683,8 @@ private:
     }
     bool Finish() { Restore(); if (Window) { Window->RequestDestroyWindow(); } Editor.Reset(); Window.Reset(); return true; }
     FAutomationTestBase& Test;
+    bool bRequestedActivation = false;
+    double ActivationDeadline = 0;
     EGlooPrintWireStyle Style, OriginalStyle = EGlooPrintWireStyle::Rounded90;
     TUniquePtr<FFixture> Fixture;
     UEdGraphNode* Target = nullptr;
