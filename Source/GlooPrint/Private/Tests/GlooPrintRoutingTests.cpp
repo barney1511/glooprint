@@ -320,6 +320,61 @@ bool FRoutingShiftedTurnsTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoutingLocalEscapeTest, "GlooPrint.Routing.CrowdedPinEscape",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoutingLocalEscapeTest::RunTest(const FString& Parameters)
+{
+    FLayoutGraph Graph;
+    for (int32 I = 0; I < 24; ++I)
+    {
+        RouteNode(Graph, {I * 272, 0}, {160, 840});
+        for (int32 P = 2; P < 8; ++P)
+        {
+            Graph.Pins.Add({FGuid(0, 0, I + 1, P + 1), I, P, P % 2 != 0, ELinkKind::Data,
+                FVector2f(P % 2 ? 160 : 0, 40 + (P / 2) * 24)});
+            ++Graph.Nodes[I].PinCount;
+        }
+    }
+    for (int32 I = 0; I < Graph.Nodes.Num(); ++I)
+    {
+        if (I + 1 < Graph.Nodes.Num()) { RouteLink(Graph, I, I + 1); }
+        for (int32 P = 0; P < 3; ++P)
+        {
+            const int32 Target = I + 1 + P * 3;
+            if (Target < Graph.Nodes.Num())
+            {
+                Graph.Edges.Add({Graph.Nodes[I].FirstPin + 3 + P * 2, Graph.Nodes[Target].FirstPin + 2 + P * 2, ELinkKind::Data});
+            }
+        }
+    }
+    for (auto Style : {EGlooPrintWireStyle::Rounded90, EGlooPrintWireStyle::Diagonal45})
+    {
+        FRouteSet Routes; FString Reason;
+        if (!TestTrue(TEXT("Crowded pin escapes compute"), ComputeRoutes(Graph, Routes, Reason, Style))) { AddError(Reason); return false; }
+        TestEqual(TEXT("All crowded connections retain custom routes"), Routes.FallbackCount, 0);
+        TestEqual(TEXT("No original pin pair is lost"), Routes.Wires.Num(), Graph.Edges.Num());
+        for (const FIntVector Example : {FIntVector(11, 15, 5), FIntVector(15, 22, 7)})
+        {
+            const auto& From = Graph.Nodes[Example.X]; const auto& To = Graph.Nodes[Example.Y];
+            const auto& Output = Graph.Pins[From.FirstPin + Example.Z];
+            const auto& Input = Graph.Pins[To.FirstPin + Example.Z - 1];
+            const auto& Route = Routes.Wires.FindChecked({From.Geometry.Id, Output.Id, To.Geometry.Id, Input.Id});
+            if (!TestTrue(TEXT("The escaped connection has a complete path"), Route.Points.Num() >= 2)) { return false; }
+            TestTrue(TEXT("A local escape avoids a full grid search"), Route.Method == ERouteMethod::Simple && Route.Search.ExpandedStates == 0);
+            TestTrue(FString::Printf(TEXT("Local step %d to %d avoids a detour below the tall nodes (length %.1f)"), Example.X, Example.Y, Route.Length),
+                Route.Length < (Example.X == 11 ? 1400.f : 2500.f));
+            TestEqual(TEXT("Escape remains attached to the original output"), Route.Points[0], FVector2f(From.Geometry.Position) + Output.Offset.GetValue());
+            TestEqual(TEXT("Escape remains attached to the original input"), Route.Points.Last(), FVector2f(To.Geometry.Position) + Input.Offset.GetValue());
+            CheckClear(*this, Graph, Route);
+        }
+        Swap(Graph.Edges[0], Graph.Edges.Last());
+        FRouteSet Cold;
+        TestTrue(TEXT("Cold shuffled escapes compute"), ComputeRoutes(Graph, Cold, Reason, Style));
+        for (const auto& Pair : Routes.Wires) { TestTrue(TEXT("Local escapes retain deterministic paths"), Cold.Wires[Pair.Key].Points == Pair.Value.Points); }
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoutingDenseFanTest, "GlooPrint.Routing.DenseFanCorridors",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FRoutingDenseFanTest::RunTest(const FString& Parameters)

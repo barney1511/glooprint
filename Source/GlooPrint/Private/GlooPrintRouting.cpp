@@ -651,30 +651,69 @@ void FRoutingJob::FState::RouteOne(int32 Index)
             }
             if (!bFound)
             {
-                TArray<float> Departures, Approaches;
-                for (float X : XChannels)
+                struct FTurn
                 {
-                    if (X >= Exit.X && ClearSegment(Exit, {X, Exit.Y}, false, false)) { Departures.Add(X); }
-                    if (X <= Entry.X && ClearSegment({X, Entry.Y}, Entry, false, false)) { Approaches.Add(X); }
-                }
+                    FVector2f Stem, Step, Corner;
+                    double LocalCost;
+                };
+                const auto Turns = [&](FVector2f Terminal, bool bOutput)
+                {
+                    TArray<FTurn> Options;
+                    TArray<float> TurnChannels = XChannels;
+                    TurnChannels.AddUnique(Terminal.X - WireLaneSpacing);
+                    TurnChannels.AddUnique(Terminal.X + WireLaneSpacing);
+                    for (float Extension : {0.f, WireLaneSpacing})
+                    for (float Offset : {0.f, -WireLaneSpacing, WireLaneSpacing})
+                    {
+                        if (Extension != 0 && Offset == 0) { continue; }
+                        const FVector2f Stem(Terminal.X + (bOutput ? Extension : -Extension), Terminal.Y);
+                        const FVector2f Step(Stem.X, Terminal.Y + Offset);
+                        if (!ClearSegment(Terminal, Stem, false, false) || !ClearSegment(Stem, Step, false, false)) { continue; }
+                        for (float X : TurnChannels)
+                        {
+                            if (Offset == 0 && (bOutput ? X < Terminal.X : X > Terminal.X)) { continue; }
+                            if (Offset != 0 && X == Stem.X) { continue; }
+                            const FVector2f Corner(X, Step.Y);
+                            if (ClearSegment(Step, Corner, false, false))
+                            {
+                                Options.Add({Stem, Step, Corner, Extension + FMath::Abs(X - Stem.X) + FMath::Abs(Offset) + (Offset != 0 ? 2 * BendCost : 0)});
+                            }
+                        }
+                    }
+                    return Options;
+                };
+                const auto Departures = Turns(Exit, true), Approaches = Turns(Entry, false);
+                double BestCost = TNumericLimits<double>::Max(); TArray<FVector2f> BestPoints;
                 for (float Y : YChannels)
                 {
-                    TOptional<float> Departure, Approach;
-                    for (float X : Departures)
+                    const double MinimumLength = FMath::Abs(double(Start.X) - End.X) + FMath::Abs(double(Start.Y) - Y) + FMath::Abs(double(End.Y) - Y);
+                    if (MinimumLength >= BestCost) { continue; }
+                    const auto Pick = [&](const TArray<FTurn>& Options, float OtherX) -> const FTurn*
                     {
-                        if (ClearSegment({X, Exit.Y}, {X, Y}, false, false)) { Departure = X; break; }
-                    }
-                    if (!Departure.IsSet()) { continue; }
-                    for (float X : Approaches)
+                        const FTurn* Best = nullptr; double Cost = TNumericLimits<double>::Max();
+                        for (const auto& Option : Options)
+                        {
+                            const double CandidateCost = Option.LocalCost + FMath::Abs(double(Option.Corner.Y) - Y) + FMath::Abs(double(Option.Corner.X) - OtherX);
+                            if (CandidateCost < Cost && ClearSegment(Option.Corner, {Option.Corner.X, Y}, false, false))
+                            {
+                                Best = &Option; Cost = CandidateCost;
+                            }
+                        }
+                        return Best;
+                    };
+                    const FTurn* Departure = Pick(Departures, Entry.X);
+                    if (!Departure) { continue; }
+                    const FTurn* Approach = Pick(Approaches, Exit.X);
+                    if (!Approach || !Accept({Start, Exit, Departure->Stem, Departure->Step, Departure->Corner,
+                        {Departure->Corner.X, Y}, {Approach->Corner.X, Y}, Approach->Corner, Approach->Step, Approach->Stem, Entry, End})) { continue; }
+                    double Cost = FMath::Max(0, Route.Points.Num() - 2) * BendCost;
+                    for (int32 I = 1; I < Route.Points.Num(); ++I)
                     {
-                        if (ClearSegment({X, Y}, {X, Entry.Y}, false, false)) { Approach = X; break; }
+                        Cost += FMath::Abs(double(Route.Points[I].X) - Route.Points[I - 1].X) + FMath::Abs(double(Route.Points[I].Y) - Route.Points[I - 1].Y);
                     }
-                    if (Approach.IsSet() && Accept({Start, Exit, {Departure.GetValue(), Exit.Y},
-                        {Departure.GetValue(), Y}, {Approach.GetValue(), Y}, {Approach.GetValue(), Entry.Y}, Entry, End}))
-                    {
-                        bFound = true; break;
-                    }
+                    if (Cost < BestCost) { BestCost = Cost; BestPoints = Route.Points; }
                 }
+                Route.Points = MoveTemp(BestPoints); bFound = !Route.Points.IsEmpty();
             }
             if (!bFound)
             {
