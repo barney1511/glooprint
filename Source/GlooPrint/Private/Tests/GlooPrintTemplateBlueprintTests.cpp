@@ -225,6 +225,29 @@ private:
     }
     void RecordMetrics(const TCHAR* Stage, const FLayoutGraph& Snapshot, const FRouteSet& Routes)
     {
+        FString Details = TEXT("node\tobject\tlabel\tx\ty\twidth\theight\tcomment\n");
+        TMap<FGuid, UEdGraphNode*> NativeNodes;
+        for (UEdGraphNode* Node : Graph->Nodes) { NativeNodes.Add(Node->NodeGuid, Node); }
+        for (int32 I = 0; I < Snapshot.Nodes.Num(); ++I)
+        {
+            const auto& Node = Snapshot.Nodes[I]; const auto* Native = NativeNodes.FindChecked(Node.Geometry.Id);
+            FString Label = Native->GetNodeTitle(ENodeTitleType::FullTitle).ToString().Replace(TEXT("\t"), TEXT(" ")).Replace(TEXT("\n"), TEXT(" | "));
+            Details += FString::Printf(TEXT("%d\t%s\t%s\t%d\t%d\t%.3f\t%.3f\t%d\n"), I, *Native->GetName(), *Label,
+                Node.Geometry.Position.X, Node.Geometry.Position.Y, Node.Geometry.BodySize.X, Node.Geometry.BodySize.Y, Node.bComment);
+        }
+        Test.TestTrue(TEXT("Save native template node diagnostics"), FFileHelper::SaveStringToFile(Details, *(Directory / (FString(Stage) + TEXT("-nodes.tsv")))));
+        Details = TEXT("edge\tkind\tfrom_node\tfrom_pin\tto_node\tto_pin\tfrom_x\tfrom_y\tto_x\tto_y\n");
+        for (int32 I = 0; I < Snapshot.Edges.Num(); ++I)
+        {
+            const auto& Edge = Snapshot.Edges[I]; const auto& A = Snapshot.Pins[Edge.From]; const auto& B = Snapshot.Pins[Edge.To];
+            const auto* From = NativeNodes.FindChecked(Snapshot.Nodes[A.Node].Geometry.Id);
+            const auto* To = NativeNodes.FindChecked(Snapshot.Nodes[B.Node].Geometry.Id);
+            const FVector2f Start = FVector2f(Snapshot.Nodes[A.Node].Geometry.Position) + A.Offset.GetValue();
+            const FVector2f End = FVector2f(Snapshot.Nodes[B.Node].Geometry.Position) + B.Offset.GetValue();
+            Details += FString::Printf(TEXT("%d\t%d\t%d\t%s\t%d\t%s\t%.3f\t%.3f\t%.3f\t%.3f\n"), I, int32(Edge.Kind), A.Node,
+                *From->Pins[A.Ordinal]->PinName.ToString(), B.Node, *To->Pins[B.Ordinal]->PinName.ToString(), Start.X, Start.Y, End.X, End.Y);
+        }
+        Test.TestTrue(TEXT("Save native template pin diagnostics"), FFileHelper::SaveStringToFile(Details, *(Directory / (FString(Stage) + TEXT("-edges.tsv")))));
         FBox2f Nodes(ForceInit), Envelope(ForceInit); int32 Bends = 0, Execution = 0, Aligned = 0; double Length = 0;
         for (const auto& Node : Snapshot.Nodes) { Nodes += FVector2f(Node.Geometry.Position); Nodes += FVector2f(Node.Geometry.Position) + Node.Geometry.BodySize; }
         Envelope = Nodes;
@@ -239,6 +262,7 @@ private:
             const auto& A = Snapshot.Pins[Edge.From]; const auto& B = Snapshot.Pins[Edge.To];
             if (A.Offset.IsSet() && B.Offset.IsSet() && Snapshot.Nodes[A.Node].Geometry.Position.Y + A.Offset->Y == Snapshot.Nodes[B.Node].Geometry.Position.Y + B.Offset->Y) { ++Aligned; }
         }
+        Test.TestEqual(TEXT("Authored spline execution chain stays exactly aligned"), Aligned, Execution);
         const FVector2f N = Nodes.Max - Nodes.Min, E = Envelope.Max - Envelope.Min;
         const FString Row = FString::Printf(TEXT("%s,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f\n"), Stage, Snapshot.Nodes.Num(), Routes.Wires.Num(), Routes.FallbackCount,
             Bends, Aligned, Execution, Length, N.X, N.Y, E.X, E.Y);

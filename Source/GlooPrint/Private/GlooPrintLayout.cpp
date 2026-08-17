@@ -980,10 +980,11 @@ static bool ComputeLayoutCandidate(const FLayoutGraph& Graph, const FLayoutSetti
             const auto& Bounds = ContentBounds.GetValue();
             const auto& Header = Graph.Nodes[Unit.Comment].Geometry.CommentHeader;
             const float HeaderBottom = Header.IsSet() ? FMath::Max(0.f, Header.GetValue().Max.Y) : 32;
-            const FVector2f Shift = FVector2f(Settings.CommentPadding, HeaderBottom + Settings.CommentPadding) - Bounds.Min;
+            const FVector2f RequiredShift = FVector2f(Settings.CommentPadding, HeaderBottom + Settings.CommentPadding) - Bounds.Min;
+            const FVector2f Shift(FMath::CeilToFloat(RequiredShift.X), FMath::CeilToFloat(RequiredShift.Y));
             for (const int32 Child : Unit.Children) { Units[Child].Position += Shift; }
-            Unit.Size = FVector2f(FMath::CeilToFloat(FMath::Max(160.0f, Bounds.Max.X - Bounds.Min.X + 2 * Settings.CommentPadding)),
-                FMath::CeilToFloat(Bounds.Max.Y - Bounds.Min.Y + HeaderBottom + 2 * Settings.CommentPadding));
+            Unit.Size = FVector2f(FMath::CeilToFloat(FMath::Max(160.0f, Bounds.Max.X + Shift.X + Settings.CommentPadding)),
+                FMath::CeilToFloat(Bounds.Max.Y + Shift.Y + Settings.CommentPadding));
             Unit.Bounds = {FVector2f::ZeroVector, Unit.Size};
         }
         if (Unit.Parent != INDEX_NONE && --Remaining[Unit.Parent] == 0) { Ready.Add(Unit.Parent); }

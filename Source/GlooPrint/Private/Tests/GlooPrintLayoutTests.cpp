@@ -416,6 +416,46 @@ bool FLayoutCommentsTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFractionalCommentAlignmentTest, "GlooPrint.Layout.FractionalCommentAlignment",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFractionalCommentAlignmentTest::RunTest(const FString& Parameters)
+{
+    FLayoutGraph Graph;
+    AddNode(Graph, {-500, 0}, {120, 100}, 43, 43);
+    AddNode(Graph, {100, 100}, {120, 100}, 43, 43);
+    AddNode(Graph, {500, 100}, {120, 100}, 59, 59);
+    AddNode(Graph, {1100, 100}, {120, 100}, 59, 59);
+    Link(Graph, 0, 1); Link(Graph, 1, 2); Link(Graph, 2, 3);
+    auto AddComment = [&](FIntPoint Position, FVector2f Size, float HeaderBottom)
+    {
+        const int32 I = AddNode(Graph, Position, Size);
+        Graph.Nodes[I].bComment = true;
+        Graph.Nodes[I].OriginalSize = FIntPoint(int32(Size.X), int32(Size.Y));
+        Graph.Nodes[I].Geometry.CommentHeader = FMeasuredRect{FVector2f::ZeroVector, FVector2f(Size.X, HeaderBottom)};
+        return I;
+    };
+    const int32 Inner = AddComment({0, 0}, {320, 320}, 37.5f);
+    const int32 Outer = AddComment({-50, -80}, {900, 600}, 41.25f);
+    for (const int32 Anchor : {0, 1})
+    {
+        Graph.Anchor = Anchor;
+        FLayoutResult Result; FString Reason;
+        if (!TestTrue(TEXT("Fractional comment titles lay out"), ComputeLayout(Graph, {}, Result, Reason))) { AddError(Reason); return false; }
+        TestEqual(TEXT("Comment-chain anchor stays fixed"), Result.Positions[Anchor], Graph.Nodes[Anchor].Geometry.Position);
+        for (const auto& Edge : Graph.Edges)
+        {
+            const auto& A = Graph.Pins[Edge.From]; const auto& B = Graph.Pins[Edge.To];
+            TestEqual(TEXT("Execution alignment survives each comment boundary"),
+                Result.Positions[A.Node].Y + A.Offset->Y, Result.Positions[B.Node].Y + B.Offset->Y);
+        }
+        TestTrue(TEXT("Inner title and padding remain clear"), Result.Positions[1].Y >= Result.Positions[Inner].Y + 69.5f);
+        TestTrue(TEXT("Outer title and padding remain clear"), Result.Positions[Inner].Y >= Result.Positions[Outer].Y + 73.25f);
+        CheckNoOverlap(*this, Graph, Result); CheckColdIdempotence(*this, Graph, Result);
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLayoutLongCycleTest, "GlooPrint.Layout.LongCycleIsBounded",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
