@@ -456,6 +456,80 @@ bool FFractionalCommentAlignmentTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDataCommentPackingTest, "GlooPrint.Layout.DataCommentBesideFlow",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDataCommentPackingTest::RunTest(const FString& Parameters)
+{
+    FLayoutGraph Graph;
+    const int32 Entry = AddNode(Graph, {-500, 0}, {160, 100});
+    const int32 Loop = AddNode(Graph, {450, 90}, {160, 130});
+    const int32 First = AddNode(Graph, {1650, 90}, {160, 100});
+    const int32 Last = AddNode(Graph, {1900, 90}, {160, 100});
+    Link(Graph, Entry, Loop); Link(Graph, Loop, First); Link(Graph, First, Last);
+    auto AddData = [&](FIntPoint Position, FVector2f Size)
+    {
+        const int32 I = AddNode(Graph, Position, Size, 30, 30);
+        Graph.Pins[Graph.Nodes[I].FirstPin].Kind = Graph.Pins[Graph.Nodes[I].FirstPin + 1].Kind = ELinkKind::Data;
+        return I;
+    };
+    const int32 Root = AddData({-500, 800}, {120, 60});
+    const int32 Shared = AddData({0, 800}, {42, 24});
+    const int32 A = AddData({350, 500}, {100, 60});
+    const int32 B = AddData({550, 500}, {100, 60});
+    const int32 C = AddData({750, 500}, {100, 60});
+    const int32 Relay = AddData({1400, 800}, {42, 24});
+    Link(Graph, Root, Shared, ELinkKind::Data); Link(Graph, Shared, A, ELinkKind::Data);
+    Link(Graph, A, B, ELinkKind::Data); Link(Graph, B, C, ELinkKind::Data); Link(Graph, C, Relay, ELinkKind::Data);
+    auto ExtraPin = [&](int32 Node, bool bOutput, FVector2f Offset)
+    {
+        const int32 Ordinal = Graph.Nodes[Node].PinCount++;
+        return Graph.Pins.Add({FGuid(0, 2, Node + 1, Ordinal + 1), Node, Ordinal, bOutput, ELinkKind::Data, Offset});
+    };
+    auto DataLink = [&](int32 From, int32 To)
+    {
+        const int32 E = Graph.Edges.Add({From, To, ELinkKind::Data});
+        Graph.Nodes[Graph.Pins[From].Node].Outgoing.Add(E); Graph.Nodes[Graph.Pins[To].Node].Incoming.Add(E);
+    };
+    DataLink(Graph.Nodes[Shared].FirstPin + 1, ExtraPin(Loop, false, {0, 80}));
+    DataLink(ExtraPin(Loop, true, {160, 80}), ExtraPin(A, false, {0, 45}));
+    DataLink(Graph.Nodes[Relay].FirstPin + 1, ExtraPin(Last, false, {0, 75}));
+    auto AddComment = [&](FIntPoint Position, FVector2f Size)
+    {
+        const int32 I = Graph.Nodes.AddDefaulted(); auto& Node = Graph.Nodes[I];
+        Node.Geometry.Id = FGuid(0, 0, 0, I + 1); Node.Geometry.Position = Position; Node.Geometry.BodySize = Size;
+        Node.Geometry.VisualBounds = {FVector2f::ZeroVector, Size};
+        Node.Geometry.CommentHeader = FMeasuredRect{FVector2f::ZeroVector, FVector2f(Size.X, 37.5f)};
+        Node.bComment = true; Node.OriginalSize = FIntPoint(int32(Size.X), int32(Size.Y));
+        return I;
+    };
+    const int32 LoopComment = AddComment({400, 0}, {260, 250});
+    AddComment({1600, 0}, {550, 250});
+    const int32 DataComment = AddComment({300, 400}, {650, 250});
+    Graph.Anchor = Entry; FString Reason; FLayoutResult Result;
+    if (!TestTrue(TEXT("Data comment fed by a flow value lays out"), ComputeLayout(Graph, {}, Result, Reason))) { AddError(Reason); return false; }
+    TestTrue(TEXT("Data comment shares horizontal space with the loop group"),
+        Result.Positions[DataComment].X < Result.Positions[LoopComment].X + Result.Sizes[LoopComment].X &&
+        Result.Positions[LoopComment].X < Result.Positions[DataComment].X + Result.Sizes[DataComment].X);
+    TestTrue(TEXT("Data comment clears the complete execution group"),
+        Result.Positions[DataComment].Y >= Result.Positions[LoopComment].Y + Result.Sizes[LoopComment].Y + 48);
+    for (const int32 Node : {Loop, First, Last}) { TestEqual(TEXT("Comment packing retains the execution spine"), Result.Positions[Node].Y, Result.Positions[Entry].Y); }
+    CheckNoOverlap(*this, Graph, Result); CheckColdIdempotence(*this, Graph, Result);
+    FLayoutGraph Shuffled = Graph; Algo::Reverse(Shuffled.Edges);
+    for (auto& Node : Shuffled.Nodes) { Node.Incoming.Reset(); Node.Outgoing.Reset(); }
+    for (int32 E = 0; E < Shuffled.Edges.Num(); ++E)
+    {
+        Shuffled.Nodes[Shuffled.Pins[Shuffled.Edges[E].From].Node].Outgoing.Add(E);
+        Shuffled.Nodes[Shuffled.Pins[Shuffled.Edges[E].To].Node].Incoming.Add(E);
+    }
+    FLayoutResult Reordered;
+    if (TestTrue(TEXT("Shuffled comment dependencies compute"), ComputeLayout(Shuffled, {}, Reordered, Reason)))
+    {
+        TestTrue(TEXT("Comment packing ignores edge enumeration order"), Reordered.Positions == Result.Positions && Reordered.Sizes == Result.Sizes);
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLayoutLongCycleTest, "GlooPrint.Layout.LongCycleIsBounded",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

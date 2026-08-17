@@ -495,7 +495,7 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
     for (int32 I = 0; I < Count; ++I)
     {
         const FUnit& Unit = Units[Children[I]];
-        Pure[I] = !Unit.bRigid && Unit.Comment == INDEX_NONE && Unit.Members.Num() == 1;
+        Pure[I] = !Unit.bRigid && (Unit.Comment != INDEX_NONE || Unit.Members.Num() == 1);
         TArray<FMember> Members;
         Collect(Units, Children[I], Members);
         for (const FMember& Member : Members)
@@ -542,6 +542,17 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
             if (Edge.Kind == ELinkKind::Execution) { Pure[A] = false; Pure[B] = false; }
             Islands.Join(A, B);
         }
+    }
+
+    FDisjointSets Dependencies(Count);
+    for (const auto& Edge : Edges)
+    {
+        if (Pure[Edge.From] && Pure[Edge.To]) { Dependencies.Join(Edge.From, Edge.To); }
+    }
+    TBitArray<> CommentDependencies(false, Count);
+    for (int32 I = 0; I < Count; ++I)
+    {
+        if (Pure[I] && Units[Children[I]].Comment != INDEX_NONE) { CommentDependencies[Dependencies.Find(I)] = true; }
     }
 
     TBitArray<> Visited(false, Count);
@@ -591,10 +602,12 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
     for (int32 I = 0; I < Order.Num(); ++I) { Rank[Order[I]] = I; }
     for (const int32 Node : Order)
     {
-        for (const int32 Edge : Outgoing[Node])
+        for (const int32 E : Outgoing[Node])
         {
-            const int32 Next = Edges[Edge].To;
-            if (Rank[Next] > Rank[Node]) { Layer[Next] = FMath::Max(Layer[Next], Layer[Node] + 1); }
+            const auto& Edge = Edges[E]; const int32 Next = Edge.To;
+            const bool bFlowValue = !Edge.bExecution && !Pure[Node] && Pure[Next] &&
+                CommentDependencies[Dependencies.Find(Next)] && Component[Node] != Component[Next];
+            if (Rank[Next] > Rank[Node] && !bFlowValue) { Layer[Next] = FMath::Max(Layer[Next], Layer[Node] + 1); }
         }
     }
     for (int32 I = Order.Num() - 1; I >= 0; --I)
@@ -615,7 +628,7 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
     for (int32 I = 0; I < Count; ++I) { IslandNodes[Islands.Find(I)].Add(I); }
     for (const auto& Edge : Edges)
     {
-        if (Rank[Edge.From] >= Rank[Edge.To]) { ++ReturnCounts[Edge.From]; }
+        if (Rank[Edge.From] >= Rank[Edge.To] || Layer[Edge.From] >= Layer[Edge.To]) { ++ReturnCounts[Edge.From]; }
     }
     TArray<float> OrderY, Scores, PinY;
     TArray<int32> PinOrder;
@@ -677,13 +690,8 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
             }
         }
     }
-    FDisjointSets Dependencies(Count);
     TArray<int32> DependencyGroupOf;
     DependencyGroupOf.Init(INDEX_NONE, Count);
-    for (const auto& Edge : Edges)
-    {
-        if (Pure[Edge.From] && Pure[Edge.To]) { Dependencies.Join(Edge.From, Edge.To); }
-    }
     PlaceExecutionChains(Units, Children, Edges, Layer, Order, Rank, OrderY, Pure, Islands, Settings.VerticalSpacing);
     TArray<FMeasuredRect> IslandBounds;
     IslandBounds.SetNum(Count);

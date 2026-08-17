@@ -69,7 +69,8 @@ public:
             {
                 const auto& N = Plan.Snapshot.Nodes[I];
                 Bounds += FVector2f(N.Geometry.Position); Bounds += FVector2f(N.Geometry.Position) + N.Geometry.BodySize;
-                Bounds += FVector2f(Plan.Layout.Positions[I]); Bounds += FVector2f(Plan.Layout.Positions[I]) + FVector2f(Plan.Layout.Sizes[I]);
+                const FVector2f ProposedSize = N.bComment ? FVector2f(Plan.Layout.Sizes[I]) : N.Geometry.BodySize;
+                Bounds += FVector2f(Plan.Layout.Positions[I]); Bounds += FVector2f(Plan.Layout.Positions[I]) + ProposedSize;
             }
             const FRouteSet* RouteSets[] = {&Plan.Routes, &Cache->GetRoutes()};
             for (const auto* Routes : RouteSets)
@@ -78,8 +79,16 @@ public:
             }
             const FVector2f Available = Panel->GetCachedGeometry().GetLocalSize();
             const FVector2f Span = Bounds.Max - Bounds.Min + FVector2f(160);
-            const float FitZoom = FMath::Clamp(FMath::Min(Available.X / Span.X, Available.Y / Span.Y), 0.05f, 1.f);
-            Editor->SetViewLocation(Bounds.Min - FVector2f(80), FitZoom);
+            const float FitZoom = FMath::Min(1.f, FMath::Min(Available.X / Span.X, Available.Y / Span.Y));
+            const auto& Levels = Panel->GetZoomLevels(); float CaptureZoom = 0;
+            for (int32 I = 0; I < Levels->GetNumZoomLevels(); ++I)
+            {
+                const float Amount = Levels->GetZoomAmount(I);
+                if (Amount <= FitZoom) { CaptureZoom = FMath::Max(CaptureZoom, Amount); }
+            }
+            if (!Test.TestTrue(TEXT("A supported native zoom fits both complete layouts"), CaptureZoom > 0)) { return Finish(); }
+            CaptureBounds = Bounds;
+            Editor->SetViewLocation(Bounds.Min - FVector2f(80), CaptureZoom);
             Phase = 1; Frames = 0; return false;
         }
         if (Phase == 1)
@@ -270,6 +279,12 @@ private:
     }
     void Capture(const TCHAR* Stage)
     {
+        FVector2f CaptureView; float CaptureZoom; Editor->GetViewLocation(CaptureView, CaptureZoom);
+        const FVector2f TopLeft = (CaptureBounds.Min - CaptureView) * CaptureZoom;
+        const FVector2f BottomRight = (CaptureBounds.Max - CaptureView) * CaptureZoom;
+        const FVector2f Available = Editor->GetGraphPanel()->GetCachedGeometry().GetLocalSize();
+        Test.TestTrue(TEXT("Native capture includes the complete authored and formatted envelopes"),
+            TopLeft.X >= 0 && TopLeft.Y >= 0 && BottomRight.X <= Available.X && BottomRight.Y <= Available.Y);
         TArray<FColor> Pixels; FIntVector Size;
         if (Test.TestTrue(TEXT("Capture the actual authored Blueprint viewport"), FSlateApplication::Get().TakeScreenshot(Editor.ToSharedRef(), Pixels, Size)))
         {
@@ -308,6 +323,7 @@ private:
     FString SourcePath, CopyPath, Directory, Mount, LastMessage;
     FString Metrics = TEXT("stage,nodes,links,fallbacks,bends,aligned_execution,execution_links,route_length,node_width,node_height,envelope_width,envelope_height\n");
     FVector2f View, CompletedView;
+    FBox2f CaptureBounds{ForceInit};
     FIntPoint Anchor;
     float Zoom = 0, CompletedZoom = 0;
     double Deadline = 0;
