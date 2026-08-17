@@ -4,6 +4,7 @@
 #include "GlooPrintSettings.h"
 #include "GlooPrintWireDrawing.h"
 #include "Algo/Reverse.h"
+#include "BlueprintConnectionDrawingPolicy.h"
 #include "Editor.h"
 #include "Editor/Transactor.h"
 #include "Framework/Application/SlateApplication.h"
@@ -16,8 +17,12 @@
 #include "Misc/OutputDeviceRedirector.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "NodeFactory.h"
+#include "Rendering/DrawElements.h"
 #include "Serialization/ObjectWriter.h"
 #include "SGraphPanel.h"
+#include "SGraphNode.h"
+#include "SGraphPin.h"
 #include "UObject/LinkerInstancingContext.h"
 #include "Widgets/SWindow.h"
 
@@ -132,6 +137,7 @@ public:
             if (Test.TestTrue(TEXT("Reordered authored links route"), ComputeLayoutRoutes(Shuffled, Cold.Layout, ShuffledRoutes, Reason,
                 bDiagonal ? EGlooPrintWireStyle::Diagonal45 : EGlooPrintWireStyle::Rounded90))) { CheckRoutes(Cold, ShuffledRoutes); }
             RecordMetrics(bDiagonal ? TEXT("FormattedDiagonal") : TEXT("FormattedRounded"), Cold.Snapshot, Cache->GetRoutes());
+            CheckPaintedRoutes(Cache->GetRoutes());
             Capture(bDiagonal ? TEXT("AfterDiagonal") : TEXT("AfterRounded"));
             Queue = GEditor->Trans->GetQueueLength(); Package->SetDirtyFlag(false); After = SerializeTransactionValues(*Graph);
             BeginFormat(); Phase = bDiagonal ? 6 : 4; return false;
@@ -230,6 +236,57 @@ private:
         {
             const auto* Route = Actual.Wires.Find(Pair.Key);
             Test.TestTrue(TEXT("Authored pin pairs keep exact cold and reordered paths"), Route && Route->Points == Pair.Value.Points);
+        }
+    }
+    void CheckPaintedRoutes(const FRouteSet& Routes)
+    {
+        auto* Panel = Editor->GetGraphPanel(); FArrangedChildren Nodes(EVisibility::Visible);
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            const auto Widget = Panel->GetNodeWidgetFromGuid(Node->NodeGuid);
+            if (!Test.TestTrue(TEXT("Authored node has native painted geometry"), Widget.IsValid())) { return; }
+            Nodes.AddWidget(FArrangedWidget(Widget.ToSharedRef(), Widget->GetCachedGeometry()));
+        }
+        const float Scale = Nodes[0].Geometry.GetAccumulatedLayoutTransform().GetScale();
+        const FVector2f Origin = Nodes[0].Geometry.GetAbsolutePosition() - FVector2f(Graph->Nodes[0]->NodePosX, Graph->Nodes[0]->NodePosY) * Scale;
+        const FSlateRect Clip(-100000, -100000, 100000, 100000);
+        for (UEdGraphNode* Node : Graph->Nodes)
+        for (UEdGraphPin* Output : Node->Pins)
+        {
+            if (Output->Direction != EGPD_Output) { continue; }
+            for (UEdGraphPin* Input : Output->LinkedTo)
+            {
+                TMap<TSharedRef<SWidget>, FArrangedWidget> Pins;
+                for (UEdGraphPin* Pin : {Output, Input})
+                {
+                    const auto Widget = Panel->GetNodeWidgetFromGuid(Pin->GetOwningNode()->NodeGuid)->FindWidgetForPin(Pin);
+                    if (!Test.TestTrue(TEXT("Authored connection retains its native pin widgets"), Widget.IsValid())) { return; }
+                    Pins.Add(Widget.ToSharedRef(), FArrangedWidget(Widget.ToSharedRef(), Widget->GetCachedGeometry()));
+                }
+                FSlateWindowElementList NativeElements(Window), CustomElements(Window);
+                FKismetConnectionDrawingPolicy Native(0, 1, Scale, Clip, NativeElements, Graph);
+                TUniquePtr<FConnectionDrawingPolicy> Custom(FNodeFactory::CreateConnectionPolicy(Graph->GetSchema(), 0, 1, Scale, Clip, CustomElements, Graph));
+                if (!Test.TestTrue(TEXT("Authored graph uses the custom drawing policy"), Custom.IsValid())) { return; }
+                Native.SetAbsoluteMousePosition(FVector2f(-100000)); Custom->SetAbsoluteMousePosition(FVector2f(-100000));
+                Native.Draw(Pins, Nodes); Custom->Draw(Pins, Nodes);
+                const auto& Baseline = NativeElements.GetUncachedDrawElements().Get<(uint8)EElementType::ET_Spline>();
+                const auto& Pieces = CustomElements.GetUncachedDrawElements().Get<(uint8)EElementType::ET_Spline>();
+                const auto* Route = Routes.Wires.Find({Node->NodeGuid, Output->PinId, Input->GetOwningNode()->NodeGuid, Input->PinId});
+                if (!Test.TestTrue(TEXT("Painted authored connection retains its cached route"), Route != nullptr) ||
+                    !Test.TestEqual(TEXT("Native geometry identifies one original connection"), Baseline.Num(), 1) ||
+                    !Test.TestTrue(TEXT("Custom drawing keeps the authored connection visible"), !Pieces.IsEmpty())) { continue; }
+                Test.TestTrue(TEXT("Styled authored wires stay attached to the native pins"),
+                    Pieces[0].P0.Equals(Baseline[0].P0, 0.1f) && Pieces.Last().P3.Equals(Baseline[0].P3, 0.1f));
+                if (!Test.TestEqual(TEXT("Live authored geometry draws every cached custom piece"), Pieces.Num(), Route->Curves.Num()))
+                {
+                    const FVector2f Start = (Baseline[0].P0 + FVector2f(4, 0) - Origin) / Scale;
+                    const FVector2f End = (Baseline[0].P3 - FVector2f(4, 0) - Origin) / Scale;
+                    Test.AddInfo(FString::Printf(TEXT("Paint fallback %s.%s -> %s.%s; live %s -> %s; cached %s -> %s; start region %s..%s; end region %s..%s"),
+                        *Node->GetName(), *Output->PinName.ToString(), *Input->GetOwningNode()->GetName(), *Input->PinName.ToString(),
+                        *Start.ToString(), *End.ToString(), *Route->Points[0].ToString(), *Route->Points.Last().ToString(),
+                        *Route->StartRegion.Min.ToString(), *Route->StartRegion.Max.ToString(), *Route->EndRegion.Min.ToString(), *Route->EndRegion.Max.ToString()));
+                }
+            }
         }
     }
     void RecordMetrics(const TCHAR* Stage, const FLayoutGraph& Snapshot, const FRouteSet& Routes)

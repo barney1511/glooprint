@@ -804,9 +804,10 @@ void FRoutingJob::FState::RouteOne(int32 Index)
             FMath::Max(Start.X + Drift, Route.Curves[0].End.X - ExitLength));
         const float EndMinX = FMath::Max(Route.Curves.Last().Start.X,
             FMath::Min(End.X - Drift, Route.Curves.Last().Start.X + ExitLength));
-        FBox2f StartRegion({FMath::Min(float(Graph.Nodes[From.Node].Geometry.Position.X), Start.X), Start.Y - Drift},
+        FBox2f StartRegion({FMath::Min(float(Graph.Nodes[From.Node].Geometry.Position.X), Start.X),
+            FMath::Min(float(Graph.Nodes[From.Node].Geometry.Position.Y), Start.Y - Drift)},
             {StartMaxX, Start.Y + Drift});
-        FBox2f EndRegion({EndMinX, End.Y - Drift},
+        FBox2f EndRegion({EndMinX, FMath::Min(float(Graph.Nodes[To.Node].Geometry.Position.Y), End.Y - Drift)},
             {FMath::Max(float(Graph.Nodes[To.Node].Geometry.Position.X) + Graph.Nodes[To.Node].Geometry.BodySize.X, End.X), End.Y + Drift});
         const bool bSingle = Route.Curves.Num() == 1;
         const FBox2f FullStart = StartRegion, FullEnd = EndRegion;

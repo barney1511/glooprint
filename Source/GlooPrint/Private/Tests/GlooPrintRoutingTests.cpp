@@ -94,6 +94,20 @@ bool FRoutingTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Straight route ends on its input pin"), Routes.Wires[Forward].Points.Last(), FVector2f(700, 40));
     TestTrue(TEXT("Low-detail source can shrink within its clear terminal region"), Routes.Wires[Forward].StartRegion.Min.X <= 20);
     TestTrue(TEXT("Native text shaping can move an output within its existing straight terminal"), Routes.Wires[Forward].StartRegion.Max.X >= 112);
+    TestTrue(TEXT("Compact native rows may move either endpoint upward by more than a fixed clearance band"),
+        Routes.Wires[Forward].StartRegion.IsInsideOrOn(FVector2f(100, 26.5f)) && Routes.Wires[Forward].EndRegion.IsInsideOrOn(FVector2f(700, 26.5f)));
+    FLayoutGraph UpperObstacle = Graph;
+    const int32 UpperBody = RouteNode(UpperObstacle, {300, -20}, {100, 30});
+    FRouteSet UpperRoutes;
+    if (TestTrue(TEXT("Original route remains clear beneath a foreign body"), ComputeRoutes(UpperObstacle, UpperRoutes, Reason)))
+    {
+        const auto& Wire = UpperRoutes.Wires[Forward];
+        FBox2f Hull = Wire.StartRegion; Hull += Wire.EndRegion;
+        const FVector2f Position(UpperObstacle.Nodes[UpperBody].Geometry.Position);
+        TestFalse(TEXT("Upward pin adaptation still excludes a foreign inflated body"),
+            Hull.Intersect(FBox2f(Position - FVector2f(12), Position + UpperObstacle.Nodes[UpperBody].Geometry.BodySize + FVector2f(12))));
+        TestEqual(TEXT("Blocked adaptation retains the original custom route"), UpperRoutes.FallbackCount, 0);
+    }
     FLayoutGraph Overlapping = Graph;
     RouteNode(Overlapping, {20, 20}, {68, 40});
     FRouteSet Constrained;
