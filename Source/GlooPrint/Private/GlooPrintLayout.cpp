@@ -914,7 +914,9 @@ static bool ComputeLayoutCandidate(const FLayoutGraph& Graph, const FLayoutSetti
     {
         if (!Graph.Pins.IsValidIndex(Edge.From) || !Graph.Pins.IsValidIndex(Edge.To) ||
             !Graph.Nodes.IsValidIndex(Graph.Pins[Edge.From].Node) || !Graph.Nodes.IsValidIndex(Graph.Pins[Edge.To].Node) ||
-            !Graph.Pins[Edge.From].Offset.IsSet() || !Graph.Pins[Edge.To].Offset.IsSet())
+            !Graph.Pins[Edge.From].Offset.IsSet() || !Graph.Pins[Edge.To].Offset.IsSet() ||
+            !FMath::IsFinite(Graph.Pins[Edge.From].Offset.GetValue().X) || !FMath::IsFinite(Graph.Pins[Edge.From].Offset.GetValue().Y) ||
+            !FMath::IsFinite(Graph.Pins[Edge.To].Offset.GetValue().X) || !FMath::IsFinite(Graph.Pins[Edge.To].Offset.GetValue().Y))
         {
             OutReason = TEXT("The layout contains an invalid edge."); return false;
         }

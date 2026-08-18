@@ -4,6 +4,7 @@
 #include "GlooPrintRouting.h"
 #include "Algo/Reverse.h"
 #include "Misc/AutomationTest.h"
+#include <limits>
 
 namespace GlooPrint::Tests
 {
@@ -139,6 +140,56 @@ bool FBodyOverlapLayoutTest::RunTest(const FString& Parameters)
             CheckColdIdempotence(*this, Tiny, Result);
         }
         else { AddError(Reason); }
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FInvalidGeometryLayoutTest, "GlooPrint.Layout.InvalidGeometryRefusal",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FInvalidGeometryLayoutTest::RunTest(const FString& Parameters)
+{
+    FLayoutGraph Valid;
+    AddNode(Valid, {0, 0}, {160, 100}); AddNode(Valid, {500, 200}, {160, 100});
+    Link(Valid, 0, 1); Valid.Anchor = 0;
+    FLayoutResult Good; FString Reason;
+    if (!TestTrue(TEXT("Reference graph has a valid layout"), ComputeLayout(Valid, {}, Good, Reason))) { AddError(Reason); return false; }
+    const auto Reject = [&](const TCHAR* Case, const FLayoutGraph& Graph, ELayoutFailure Expected = ELayoutFailure::InvalidInput)
+    {
+        FLayoutResult Result = Good; ELayoutFailure Failure = ELayoutFailure::None;
+        TestFalse(Case, ComputeLayout(Graph, {}, Result, Reason, &Failure));
+        TestEqual(TEXT("Refusal distinguishes bad input from an unsatisfied constraint"), Failure, Expected);
+        TestTrue(TEXT("Refused geometry exposes no partial or stale layout"),
+            Result.Positions.IsEmpty() && Result.Sizes.IsEmpty() && Result.FeedbackEdges.Num() == 0);
+        TestFalse(TEXT("Refusal explains why formatting cannot proceed"), Reason.IsEmpty());
+    };
+    FLayoutGraph Invalid = Valid;
+    Invalid.Nodes[0].Geometry.BodySize.X = -1;
+    Reject(TEXT("Negative measured body size is refused"), Invalid);
+    Invalid = Valid; Invalid.Nodes[0].Geometry.VisualBounds.Max.Y = -1;
+    Reject(TEXT("Inverted visual bounds are refused"), Invalid);
+    Invalid = Valid; Invalid.Pins[Valid.Edges[0].To].Offset.Reset();
+    Reject(TEXT("Missing linked-pin geometry is refused"), Invalid);
+    Invalid = Valid; Invalid.Edges[0].To = Invalid.Pins.Num();
+    Reject(TEXT("Missing linked-pin identity is refused before traversal"), Invalid);
+    for (const float NonFinite : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()})
+    {
+        Invalid = Valid; Invalid.Nodes[0].Geometry.BodySize.Y = NonFinite;
+        Reject(TEXT("Non-finite body geometry is refused"), Invalid);
+        Invalid = Valid; Invalid.Nodes[0].Geometry.VisualBounds.Min.X = NonFinite;
+        Reject(TEXT("Non-finite visual bounds are refused"), Invalid);
+        for (const int32 Pin : {Valid.Edges[0].From, Valid.Edges[0].To})
+        {
+            for (int32 Axis = 0; Axis < 2; ++Axis)
+            {
+                Invalid = Valid; Invalid.Pins[Pin].Offset.GetValue()[Axis] = NonFinite;
+                Reject(TEXT("Either coordinate of either connected pin must be finite"), Invalid);
+            }
+        }
+    }
+    for (const int32 Position : {-16777220, 16777220})
+    {
+        Invalid = Valid; Invalid.Nodes[0].Geometry.Position.X = Position;
+        Reject(TEXT("An out-of-range anchor cannot publish unreliable positions"), Invalid, ELayoutFailure::Constraints);
     }
     return true;
 }
