@@ -32,7 +32,7 @@ namespace GlooPrint::Tests
 class FTemplateBlueprintCheck final : public IAutomationLatentCommand, public FOutputDevice
 {
 public:
-    explicit FTemplateBlueprintCheck(FAutomationTestBase& InTest) : Test(InTest) {}
+    FTemplateBlueprintCheck(FAutomationTestBase& InTest, const TCHAR* InAssetName) : Test(InTest), AssetName(InAssetName) {}
     virtual ~FTemplateBlueprintCheck() { Restore(); }
     virtual bool CanBeUsedOnAnyThread() const override { return true; }
     virtual bool CanBeUsedOnMultipleThreads() const override { return true; }
@@ -67,8 +67,8 @@ public:
             if (!Test.TestTrue(TEXT("Authored construction script has a complete format plan"),
                 PlanFormatGraph(Graph, Scale, {Entry->NodeGuid}, Plan, Reason))) { Test.AddError(Reason); return Finish(); }
             Test.TestTrue(TEXT("Planning preserves authored graph data"), Original == SerializeNodes(*Graph));
-            Test.AddInfo(FString::Printf(TEXT("Installed spline mesh construction script: %d nodes, %d pins, %d links, %d spacing repairs."),
-                Plan.Snapshot.Nodes.Num(), Plan.Snapshot.Pins.Num(), Plan.Snapshot.Edges.Num(), Plan.SpacingRepairs));
+            Test.AddInfo(FString::Printf(TEXT("Installed %s construction script: %d nodes, %d pins, %d links, %d spacing repairs."),
+                *AssetName, Plan.Snapshot.Nodes.Num(), Plan.Snapshot.Pins.Num(), Plan.Snapshot.Edges.Num(), Plan.SpacingRepairs));
             RecordMetrics(TEXT("AuthoredRounded"), Plan.Snapshot, Cache->GetRoutes());
             FBox2f Bounds(ForceInit);
             for (int32 I = 0; I < Plan.Snapshot.Nodes.Num(); ++I)
@@ -162,16 +162,16 @@ private:
     bool Start()
     {
         bInitialized = true; Deadline = FPlatformTime::Seconds() + 90;
-        SourcePath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("../Templates/TP_AEC_ArchvisBP/Content/ArchvisProject/Blueprints/BP_Splinemesh.uasset"));
+        SourcePath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("../Templates/TP_AEC_ArchvisBP/Content/ArchvisProject/Blueprints") / (AssetName + TEXT(".uasset")));
         if (!Test.TestTrue(TEXT("Installed architectural spline template is available"), FFileHelper::LoadFileToArray(SourceBytes, *SourcePath))) { return true; }
         const FString Id = FGuid::NewGuid().ToString(EGuidFormats::Digits);
         Directory = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("TemplateBlueprint") / Id) + TEXT("/");
-        Mount = TEXT("/GlooPrintTemplate_") + Id + TEXT("/"); CopyPath = Directory / TEXT("BP_Splinemesh.uasset");
+        Mount = TEXT("/GlooPrintTemplate_") + Id + TEXT("/"); CopyPath = Directory / (AssetName + TEXT(".uasset"));
         IFileManager::Get().MakeDirectory(*Directory, true);
         if (!Test.TestTrue(TEXT("Copy the authored asset into a private fixture directory"), FFileHelper::SaveArrayToFile(SourceBytes, *CopyPath))) { return true; }
         FPackageName::RegisterMountPoint(Mount, Directory); bMounted = true;
-        const FString Name = Mount + TEXT("BP_Splinemesh"); FLinkerInstancingContext Context(true);
-        Context.AddPackageMapping(TEXT("/Game/ArchvisProject/Blueprints/BP_Splinemesh"), FName(*Name));
+        const FString Name = Mount + AssetName; FLinkerInstancingContext Context(true);
+        Context.AddPackageMapping(FName(*(TEXT("/Game/ArchvisProject/Blueprints/") + AssetName)), FName(*Name));
         Package.Reset(LoadPackage(nullptr, *Name, LOAD_None, nullptr, &Context));
         if (!Test.TestNotNull(TEXT("Native loader instances the copied package"), Package.Get())) { return Finish(); }
         Test.TestEqual(TEXT("Only the private package is loaded for formatting"), Package->GetName(), Name);
@@ -187,7 +187,7 @@ private:
         Settings->HorizontalSpacing = 96; Settings->VerticalSpacing = 48; Settings->CommentPadding = 32;
         Settings->WireStyle = EGlooPrintWireStyle::Rounded90; Settings->bFormattingEnabled = true; Settings->NotifyChanged();
         Editor = SNew(SGraphEditor).GraphToEdit(Graph).IsEditable(true);
-        Window = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint authored spline mesh Blueprint"))).ClientSize(FVector2f(1550, 1000))[Editor.ToSharedRef()];
+        Window = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint authored ") + AssetName)).ClientSize(FVector2f(1550, 1000))[Editor.ToSharedRef()];
         FSlateApplication::Get().AddWindow(Window.ToSharedRef()); Editor->SetNodeSelection(Entry, true); Editor->ZoomToFit(false);
         GLog->AddOutputDevice(this); bListening = true;
         Test.AddInfo(TEXT("Private authored template artifacts: ") + Directory); return false;
@@ -372,6 +372,7 @@ private:
         }
     }
     FAutomationTestBase& Test;
+    const FString AssetName;
     TStrongObjectPtr<UPackage> Package;
     TStrongObjectPtr<UBlueprint> Blueprint;
     UEdGraph* Graph = nullptr;
@@ -399,7 +400,14 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTemplateSplineMeshTest, "GlooPrint.Editor.Temp
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FTemplateSplineMeshTest::RunTest(const FString& Parameters)
 {
-    ADD_LATENT_AUTOMATION_COMMAND(FTemplateBlueprintCheck(*this)); return true;
+    ADD_LATENT_AUTOMATION_COMMAND(FTemplateBlueprintCheck(*this, TEXT("BP_Splinemesh"))); return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTemplateSplineSpawnTest, "GlooPrint.Editor.TemplateSplineSpawn",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FTemplateSplineSpawnTest::RunTest(const FString& Parameters)
+{
+    ADD_LATENT_AUTOMATION_COMMAND(FTemplateBlueprintCheck(*this, TEXT("BP_SpawnMeshAlongSpline"))); return true;
 }
 }
 #endif
