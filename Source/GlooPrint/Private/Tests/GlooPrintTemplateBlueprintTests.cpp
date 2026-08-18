@@ -7,6 +7,7 @@
 #include "BlueprintConnectionDrawingPolicy.h"
 #include "Editor.h"
 #include "Editor/Transactor.h"
+#include "EdGraphSchema_K2.h"
 #include "Framework/Application/SlateApplication.h"
 #include "HAL/FileManager.h"
 #include "ImageUtils.h"
@@ -277,6 +278,12 @@ private:
                     !Test.TestTrue(TEXT("Custom drawing keeps the authored connection visible"), !Pieces.IsEmpty())) { continue; }
                 Test.TestTrue(TEXT("Styled authored wires stay attached to the native pins"),
                     Pieces[0].P0.Equals(Baseline[0].P0, 0.1f) && Pieces.Last().P3.Equals(Baseline[0].P3, 0.1f));
+                if (Output->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+                {
+                    Test.TestEqual(TEXT("Authored execution chain draws without a comment detour"), Pieces.Num(), 1);
+                    Test.TestTrue(TEXT("Authored execution stays horizontal at the actual native pins"),
+                        FMath::IsNearlyEqual(Pieces[0].P0.Y, Pieces.Last().P3.Y, 0.1f));
+                }
                 if (!Test.TestEqual(TEXT("Live authored geometry draws every cached custom piece"), Pieces.Num(), Route->Curves.Num()))
                 {
                     const FVector2f Start = (Baseline[0].P0 + FVector2f(4, 0) - Origin) / Scale;

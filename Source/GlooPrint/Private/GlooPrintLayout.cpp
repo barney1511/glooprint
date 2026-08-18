@@ -146,6 +146,13 @@ struct FProjectedEdge
     bool bExecution;
 };
 
+struct FBoundaryExecution
+{
+    int32 Column;
+    float Y;
+    bool bOutput;
+};
+
 bool EarlierOutput(const FProjectedEdge& A, const FProjectedEdge& B)
 {
     if (A.FromY != B.FromY) { return A.FromY < B.FromY; }
@@ -273,9 +280,15 @@ void PlaceExecutionChains(TArray<FUnit>& Units, const TArray<int32>& Children, c
 void PlacePureDependencies(TArray<FUnit>& Units, const TArray<int32>& Children,
     const TArray<FProjectedEdge>& Edges, const TArray<TArray<int32>>& Outgoing,
     const TArray<TArray<int32>>& Layers, const TArray<int32>& Layer, const TArray<float>& OrderY,
-    const TBitArray<>& Pure, FDisjointSets& Dependencies, TArray<int32>& GroupOf, float Spacing)
+    const TBitArray<>& Pure, FDisjointSets& Dependencies, TArray<int32>& GroupOf, float Spacing,
+    const TArray<FBoundaryExecution>& Boundaries)
 {
-    struct FProfile { int32 Column; float Min, Max; };
+    struct FProfile
+    {
+        int32 Column;
+        float Min, Max;
+        FVector2f Left = FVector2f::ZeroVector, Right = FVector2f::ZeroVector;
+    };
     struct FGroup
     {
         int32 Key;
@@ -355,7 +368,7 @@ void PlacePureDependencies(TArray<FUnit>& Units, const TArray<int32>& Children,
     }
     Groups.Sort([](const auto& A, const auto& B) { return A.Min != B.Min ? A.Min < B.Min : A.Key < B.Key; });
     TArray<FVector2f> Forbidden;
-    for (const auto& Group : Groups)
+    for (auto& Group : Groups)
     {
         Forbidden.Reset();
         for (const auto& Profile : Group.Profile)
@@ -364,6 +377,27 @@ void PlacePureDependencies(TArray<FUnit>& Units, const TArray<int32>& Children,
             {
                 const float Min = FMath::FloorToFloat(Obstacle.X - Spacing - Profile.Max) + 1;
                 const float Max = FMath::CeilToFloat(Obstacle.Y + Spacing - Profile.Min) - 1;
+                if (Min <= Max) { Forbidden.Add({Min, Max}); }
+            }
+        }
+        if (!Boundaries.IsEmpty())
+        {
+            Group.Profile.Sort([](const auto& A, const auto& B) { return A.Column < B.Column; });
+            FVector2f Left(MAX_flt, -MAX_flt), Right(MAX_flt, -MAX_flt);
+            for (int32 I = 0; I < Group.Profile.Num(); ++I)
+            {
+                auto& A = Group.Profile[I]; auto& B = Group.Profile[Group.Profile.Num() - 1 - I];
+                Left = {FMath::Min(Left.X, A.Min), FMath::Max(Left.Y, A.Max)}; A.Left = Left;
+                Right = {FMath::Min(Right.X, B.Min), FMath::Max(Right.Y, B.Max)}; B.Right = Right;
+            }
+            for (const auto& Boundary : Boundaries)
+            {
+                const int32 Index = Boundary.bOutput ? Algo::UpperBoundBy(Group.Profile, Boundary.Column, &FProfile::Column)
+                    : Algo::LowerBoundBy(Group.Profile, Boundary.Column, &FProfile::Column) - 1;
+                if (!Group.Profile.IsValidIndex(Index)) { continue; }
+                const FVector2f Span = Boundary.bOutput ? Group.Profile[Index].Right : Group.Profile[Index].Left;
+                const float Min = FMath::FloorToFloat(Boundary.Y - WireNodeClearance - Span.Y) + 1;
+                const float Max = FMath::CeilToFloat(Boundary.Y + WireNodeClearance - Span.X) - 1;
                 if (Min <= Max) { Forbidden.Add({Min, Max}); }
             }
         }
@@ -518,6 +552,7 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
     FDisjointSets Islands(Count);
     TArray<int32> ReturnCounts;
     ReturnCounts.Init(0, Count);
+    TArray<int32> BoundaryPins;
     for (const int32 Node : Present)
     {
         for (const int32 EdgeIndex : Graph.Nodes[Node].Outgoing)
@@ -526,7 +561,11 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
             const FLayoutPin& From = Graph.Pins[Edge.From];
             const FLayoutPin& To = Graph.Pins[Edge.To];
             const int32 A = Owner[From.Node], B = Owner[To.Node];
-            if (B == INDEX_NONE) { continue; }
+            if (B == INDEX_NONE)
+            {
+                if (Edge.Kind == ELinkKind::Execution) { BoundaryPins.Add(Edge.From); }
+                continue;
+            }
             if (A == B)
             {
                 if (Units[Children[A]].Comment == INDEX_NONE &&
@@ -541,6 +580,11 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
             Outgoing[A].Add(Index); Incoming[B].Add(Index);
             if (Edge.Kind == ELinkKind::Execution) { Pure[A] = false; Pure[B] = false; }
             Islands.Join(A, B);
+        }
+        for (const int32 EdgeIndex : Graph.Nodes[Node].Incoming)
+        {
+            const auto& Edge = Graph.Edges[EdgeIndex];
+            if (Edge.Kind == ELinkKind::Execution && Owner[Graph.Pins[Edge.From].Node] == INDEX_NONE) { BoundaryPins.Add(Edge.To); }
         }
     }
 
@@ -693,6 +737,14 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
     TArray<int32> DependencyGroupOf;
     DependencyGroupOf.Init(INDEX_NONE, Count);
     PlaceExecutionChains(Units, Children, Edges, Layer, Order, Rank, OrderY, Pure, Islands, Settings.VerticalSpacing);
+    TMap<int32, TArray<FBoundaryExecution>> IslandBoundaries;
+    for (const int32 PinIndex : BoundaryPins)
+    {
+        const auto& Pin = Graph.Pins[PinIndex]; const int32 Node = Owner[Pin.Node];
+        IslandBoundaries.FindOrAdd(Islands.Find(Node)).Add({Layer[Node],
+            Units[Children[Node]].Position.Y + Offset[Pin.Node].Y + Pin.Offset.GetValue().Y, Pin.bOutput});
+    }
+    const TArray<FBoundaryExecution> NoBoundaries;
     TArray<FMeasuredRect> IslandBounds;
     IslandBounds.SetNum(Count);
     float Widest = 0;
@@ -713,7 +765,9 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
         {
             Nodes.Sort([&](int32 A, int32 B) { return OrderY[A] != OrderY[B] ? OrderY[A] < OrderY[B] : A < B; });
         }
-        PlacePureDependencies(Units, Children, Edges, Outgoing, Layers, Layer, OrderY, Pure, Dependencies, DependencyGroupOf, Settings.VerticalSpacing);
+        const auto* Boundaries = IslandBoundaries.Find(Islands.Find(Island[0]));
+        PlacePureDependencies(Units, Children, Edges, Outgoing, Layers, Layer, OrderY, Pure, Dependencies, DependencyGroupOf,
+            Settings.VerticalSpacing, Boundaries ? *Boundaries : NoBoundaries);
         Events.Reset();
         for (const int32 Node : Island)
         {

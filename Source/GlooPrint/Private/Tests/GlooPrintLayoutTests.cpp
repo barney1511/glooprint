@@ -456,6 +456,70 @@ bool FFractionalCommentAlignmentTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCommentExecutionCorridorTest, "GlooPrint.Layout.CommentExecutionCorridors",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCommentExecutionCorridorTest::RunTest(const FString& Parameters)
+{
+    for (const bool bOutgoing : {false, true})
+    {
+        FLayoutGraph Graph;
+        AddNode(Graph, {-500, 100}, {120, 100});
+        const int32 Flow = AddNode(Graph, {500, 100}, {160, 120});
+        const int32 Next = AddNode(Graph, {1500, 100}, {120, 100});
+        const int32 A = AddNode(Graph, {100, 150}, {100, 60}, 30, 30);
+        const int32 B = AddNode(Graph, {300, 150}, {100, 60}, 30, 30);
+        for (const int32 I : {A, B})
+        {
+            Graph.Pins[Graph.Nodes[I].FirstPin].Kind = Graph.Pins[Graph.Nodes[I].FirstPin + 1].Kind = ELinkKind::Data;
+        }
+        Link(Graph, 0, Flow); Link(Graph, Flow, Next); Link(Graph, A, B, ELinkKind::Data);
+        auto ExtraPin = [&](int32 Node, bool bOutput)
+        {
+            const int32 Ordinal = Graph.Nodes[Node].PinCount++;
+            return Graph.Pins.Add({FGuid(0, 2, Node + 1, Ordinal + 1), Node, Ordinal, bOutput, ELinkKind::Data,
+                FVector2f(bOutput ? Graph.Nodes[Node].Geometry.BodySize.X : 0, 60)});
+        };
+        auto DataLink = [&](int32 From, int32 To)
+        {
+            const int32 E = Graph.Edges.Add({From, To, ELinkKind::Data});
+            Graph.Nodes[Graph.Pins[From].Node].Outgoing.Add(E); Graph.Nodes[Graph.Pins[To].Node].Incoming.Add(E);
+        };
+        DataLink(Graph.Nodes[B].FirstPin + 1, ExtraPin(bOutgoing ? Next : Flow, false));
+        if (bOutgoing) { DataLink(ExtraPin(Flow, true), Graph.Nodes[A].FirstPin); }
+        const int32 C = Graph.Nodes.AddDefaulted(); auto& Comment = Graph.Nodes[C];
+        Comment.Geometry.Id = FGuid(0, 0, 0, C + 1); Comment.Geometry.Position = {0, 0}; Comment.Geometry.BodySize = {1000, 400};
+        Comment.Geometry.VisualBounds = {FVector2f::ZeroVector, Comment.Geometry.BodySize};
+        Comment.Geometry.CommentHeader = FMeasuredRect{FVector2f::ZeroVector, FVector2f(1000, 37.5f)};
+        Comment.bComment = true; Comment.OriginalSize = {1000, 400}; Graph.Anchor = 0;
+        FString Reason; FLayoutResult Result;
+        if (!TestTrue(TEXT("Comment boundary execution corridor lays out"), ComputeLayout(Graph, {}, Result, Reason))) { AddError(Reason); continue; }
+        const float Row = Result.Positions[Flow].Y + 40;
+        for (const int32 I : {A, B})
+        {
+            TestTrue(TEXT("Complete pure expression clears the boundary execution row"),
+                Result.Positions[I].Y >= Row + WireNodeClearance || Result.Positions[I].Y + 60 <= Row - WireNodeClearance);
+        }
+        CheckNoOverlap(*this, Graph, Result); CheckColdIdempotence(*this, Graph, Result);
+        for (const auto Style : {EGlooPrintWireStyle::Rounded90, EGlooPrintWireStyle::Diagonal45})
+        {
+            FRouteSet Routes;
+            if (!TestTrue(TEXT("Comment corridors route in either style"), ComputeLayoutRoutes(Graph, Result, Routes, Reason, Style))) { AddError(Reason); continue; }
+            for (const auto& Edge : Graph.Edges)
+            {
+                if (Edge.Kind != ELinkKind::Execution) { continue; }
+                const auto& From = Graph.Pins[Edge.From]; const auto& To = Graph.Pins[Edge.To];
+                const auto* Route = Routes.Wires.Find({Graph.Nodes[From.Node].Geometry.Id, From.Id, Graph.Nodes[To.Node].Geometry.Id, To.Id});
+                if (TestTrue(TEXT("Boundary execution keeps its original connection"), Route != nullptr))
+                {
+                    TestEqual(TEXT("Incoming and outgoing execution cross the comment without detours"), Route->Curves.Num(), 1);
+                }
+            }
+        }
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDataCommentPackingTest, "GlooPrint.Layout.DataCommentBesideFlow",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

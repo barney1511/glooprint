@@ -5,6 +5,7 @@
 
 namespace GlooPrint
 {
+inline constexpr float WireNodeClearance = 12.f;
 inline constexpr float WireExitLength = 24.f;
 inline constexpr float WireLaneSpacing = 12.f;
 

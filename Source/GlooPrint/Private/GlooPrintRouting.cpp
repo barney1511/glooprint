@@ -10,7 +10,7 @@ namespace GlooPrint
 {
 namespace
 {
-constexpr float Clearance = 12;
+constexpr float Clearance = WireNodeClearance;
 constexpr float ExitLength = WireExitLength;
 constexpr float CornerRadius = 12;
 constexpr float CellSize = 256;
