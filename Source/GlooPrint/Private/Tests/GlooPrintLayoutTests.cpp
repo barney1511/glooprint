@@ -571,6 +571,87 @@ bool FCommentExecutionCorridorTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCommentConsumerOrderTest, "GlooPrint.Layout.CommentConsumerPinOrder",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCommentConsumerOrderTest::RunTest(const FString& Parameters)
+{
+    for (const bool bRelays : {false, true})
+    {
+        FLayoutGraph Graph;
+        const int32 Consumer = AddNode(Graph, {1800, -100}, {240, 320});
+        const int32 Entry = AddNode(Graph, {1400, -300}, {160, 80});
+        Link(Graph, Entry, Consumer); Graph.Anchor = Entry;
+        auto DataNode = [&](FIntPoint Position, FVector2f Size)
+        {
+            const int32 Node = AddNode(Graph, Position, Size, 30, 30);
+            Graph.Pins[Graph.Nodes[Node].FirstPin].Kind = Graph.Pins[Graph.Nodes[Node].FirstPin + 1].Kind = ELinkKind::Data;
+            return Node;
+        };
+        auto Input = [&](int32 Node, float Y)
+        {
+            const int32 Ordinal = Graph.Nodes[Node].PinCount++;
+            return Graph.Pins.Add({FGuid(0, 9, Node + 1, Ordinal + 1), Node, Ordinal, false, ELinkKind::Data, FVector2f(0, Y)});
+        };
+        auto ToPin = [&](int32 Node, int32 Pin)
+        {
+            const int32 E = Graph.Edges.Add({Graph.Nodes[Node].FirstPin + 1, Pin, ELinkKind::Data});
+            Graph.Nodes[Node].Outgoing.Add(E); Graph.Nodes[Graph.Pins[Pin].Node].Incoming.Add(E);
+        };
+        const int32 Root = DataNode({100, 100}, {100, 60});
+        int32 Calls[4], Leaves[4];
+        for (int32 Branch = 3; Branch >= 0; --Branch)
+        {
+            Calls[Branch] = Leaves[Branch] = DataNode({300, 250 + Branch * 200}, {160, 120});
+            Link(Graph, Root, Calls[Branch], ELinkKind::Data);
+            if (Branch % 2)
+            {
+                Leaves[Branch] = DataNode({700, 250 + Branch * 200}, {160, 100});
+                Link(Graph, Calls[Branch], Leaves[Branch], ELinkKind::Data);
+                const int32 Literal = DataNode({520, 380 + Branch * 200}, {100, 40});
+                ToPin(Literal, Input(Leaves[Branch], 80));
+            }
+            const int32 Pin = Input(Consumer, 120 + Branch * 40);
+            if (bRelays)
+            {
+                const int32 Relay = DataNode({1400, 200 + Branch * 150}, {42, 24});
+                Graph.Nodes[Relay].bReroute = true;
+                Link(Graph, Leaves[Branch], Relay, ELinkKind::Data); ToPin(Relay, Pin);
+            }
+            else { ToPin(Leaves[Branch], Pin); }
+        }
+        const int32 CommentIndex = Graph.Nodes.AddDefaulted(); auto& Comment = Graph.Nodes[CommentIndex];
+        Comment.Geometry.Id = FGuid(0, 0, 0, CommentIndex + 1); Comment.Geometry.Position = {0, 0};
+        Comment.Geometry.BodySize = {1100, 1300}; Comment.Geometry.VisualBounds = {FVector2f::ZeroVector, Comment.Geometry.BodySize};
+        Comment.Geometry.CommentHeader = FMeasuredRect{FVector2f::ZeroVector, FVector2f(1100, 30)};
+        Comment.bComment = true; Comment.OriginalSize = {1100, 1300};
+        FString Reason; FLayoutResult Result;
+        if (!TestTrue(TEXT("Shared comment outputs lay out"), ComputeLayout(Graph, {}, Result, Reason))) { AddError(Reason); continue; }
+        for (int32 Branch = 1; Branch < 4; ++Branch)
+        {
+            TestTrue(TEXT("Calculations follow the external consumer's visible pin order"),
+                Result.Positions[Calls[Branch - 1]].Y < Result.Positions[Calls[Branch]].Y);
+            TestTrue(TEXT("Mixed-depth comment outputs retain the same vertical order"),
+                Result.Positions[Leaves[Branch - 1]].Y < Result.Positions[Leaves[Branch]].Y);
+        }
+        TestEqual(TEXT("External execution chain stays straight"), Result.Positions[Entry].Y, Result.Positions[Consumer].Y);
+        CheckNoOverlap(*this, Graph, Result); CheckColdIdempotence(*this, Graph, Result);
+        FLayoutGraph Shuffled = Graph; Algo::Reverse(Shuffled.Edges);
+        for (auto& Node : Shuffled.Nodes) { Node.Incoming.Reset(); Node.Outgoing.Reset(); }
+        for (int32 E = 0; E < Shuffled.Edges.Num(); ++E)
+        {
+            Shuffled.Nodes[Shuffled.Pins[Shuffled.Edges[E].From].Node].Outgoing.Add(E);
+            Shuffled.Nodes[Shuffled.Pins[Shuffled.Edges[E].To].Node].Incoming.Add(E);
+        }
+        FLayoutResult Reordered;
+        if (TestTrue(TEXT("Shuffled external consumers lay out"), ComputeLayout(Shuffled, {}, Reordered, Reason)))
+        {
+            TestTrue(TEXT("Consumer ordering ignores edge enumeration"), Reordered.Positions == Result.Positions && Reordered.Sizes == Result.Sizes);
+        }
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDataCommentPackingTest, "GlooPrint.Layout.DataCommentBesideFlow",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

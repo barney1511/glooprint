@@ -85,7 +85,7 @@ public:
             }
             const FVector2f Available = Panel->GetCachedGeometry().GetLocalSize();
             const FVector2f Span = Bounds.Max - Bounds.Min + FVector2f(160);
-            const float FitZoom = FMath::Min(1.f, FMath::Min(Available.X / Span.X, Available.Y / Span.Y));
+            const float FitZoom = FMath::Min(0.25f, FMath::Min(Available.X / Span.X, Available.Y / Span.Y));
             const auto& Levels = Panel->GetZoomLevels(); float CaptureZoom = 0;
             for (int32 I = 0; I < Levels->GetNumZoomLevels(); ++I)
             {

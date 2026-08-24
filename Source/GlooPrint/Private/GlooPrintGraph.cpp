@@ -6,6 +6,7 @@
 #include "Editor.h"
 #include "Engine/Blueprint.h"
 #include "Framework/Application/SlateApplication.h"
+#include "K2Node_Knot.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
@@ -71,6 +72,7 @@ static bool BuildSnapshot(UEdGraph* Graph, FGraphMeasurement Measurement, const 
         Item.FirstPin = Result.Pins.Num();
         Item.PinCount = Node->Pins.Num();
         Item.bComment = Node->IsA<UEdGraphNode_Comment>();
+        Item.bReroute = Node->IsA<UK2Node_Knot>();
         Item.OriginalSize = FIntPoint(Node->NodeWidth, Node->NodeHeight);
         bool bExecutionInput = false;
         bool bExecutionOutput = false;

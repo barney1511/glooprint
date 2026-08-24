@@ -34,6 +34,7 @@ struct FLayoutNode
     TArray<int32> Outgoing;
     bool bEntry = false;
     bool bComment = false;
+    bool bReroute = false;
     FIntPoint OriginalSize = FIntPoint::ZeroValue;
 };
 

@@ -277,11 +277,70 @@ void PlaceExecutionChains(TArray<FUnit>& Units, const TArray<int32>& Children, c
     }
 }
 
+TArray<TOptional<float>> ExternalConsumerOrder(const FLayoutGraph& Graph, const TArray<int32>& Owner,
+    const TArray<int32>& BoundaryData, const TArray<FProjectedEdge>& Edges, const TArray<TArray<int32>>& Outgoing,
+    const TArray<int32>& Order, const TArray<int32>& Rank, const TBitArray<>& Pure, FDisjointSets& Dependencies)
+{
+    const int32 Count = Order.Num();
+    TArray<TOptional<float>> Scores; Scores.SetNum(Count);
+    if (BoundaryData.IsEmpty()) { return Scores; }
+    TArray<int32> Consumer, Resolved, Path;
+    Consumer.Init(INDEX_NONE, Count); Resolved.Init(-2, Graph.Nodes.Num());
+    TBitArray<> Ambiguous(false, Count);
+    TArray<TArray<float>> Targets; Targets.SetNum(Count);
+    const auto TerminalPin = [&](int32 Pin)
+    {
+        Path.Reset();
+        while (Owner[Graph.Pins[Pin].Node] == INDEX_NONE && Graph.Nodes[Graph.Pins[Pin].Node].bReroute)
+        {
+            const int32 Node = Graph.Pins[Pin].Node;
+            if (Resolved[Node] != -2) { Pin = Resolved[Node]; break; }
+            Resolved[Node] = INDEX_NONE; Path.Add(Node);
+            const auto& Links = Graph.Nodes[Node].Outgoing;
+            if (Links.Num() != 1 || Graph.Edges[Links[0]].Kind != ELinkKind::Data) { Pin = INDEX_NONE; break; }
+            Pin = Graph.Edges[Links[0]].To;
+        }
+        if (Pin != INDEX_NONE && Owner[Graph.Pins[Pin].Node] != INDEX_NONE) { Pin = INDEX_NONE; }
+        for (const int32 Node : Path) { Resolved[Node] = Pin; }
+        return Pin;
+    };
+    for (const int32 E : BoundaryData)
+    {
+        const auto& Edge = Graph.Edges[E]; const int32 Node = Owner[Graph.Pins[Edge.From].Node];
+        if (!Pure[Node]) { continue; }
+        const int32 Group = Dependencies.Find(Node), Pin = TerminalPin(Edge.To);
+        if (Pin == INDEX_NONE) { Ambiguous[Group] = true; continue; }
+        const auto& To = Graph.Pins[Pin];
+        if (Consumer[Group] == INDEX_NONE) { Consumer[Group] = To.Node; }
+        else if (Consumer[Group] != To.Node) { Ambiguous[Group] = true; }
+        Targets[Node].Add(To.Offset.GetValue().Y);
+    }
+    for (int32 I = Order.Num() - 1; I >= 0; --I)
+    {
+        const int32 Node = Order[I], Group = Dependencies.Find(Node);
+        if (!Pure[Node] || Consumer[Group] == INDEX_NONE || Ambiguous[Group]) { continue; }
+        for (const int32 E : Outgoing[Node])
+        {
+            const int32 Next = Edges[E].To;
+            if (!Pure[Next] || Rank[Next] <= Rank[Node]) { Ambiguous[Group] = true; continue; }
+            if (Scores[Next].IsSet()) { Targets[Node].Add(Scores[Next].GetValue()); }
+        }
+        auto& Values = Targets[Node];
+        if (Values.IsEmpty()) { Ambiguous[Group] = true; continue; }
+        Values.Sort(); Scores[Node] = (Values[Values.Num() / 2] + Values[(Values.Num() - 1) / 2]) * 0.5f;
+    }
+    for (int32 I = 0; I < Count; ++I)
+    {
+        if (Ambiguous[Dependencies.Find(I)]) { Scores[I].Reset(); }
+    }
+    return Scores;
+}
+
 void PlacePureDependencies(TArray<FUnit>& Units, const TArray<int32>& Children,
     const TArray<FProjectedEdge>& Edges, const TArray<TArray<int32>>& Outgoing,
     const TArray<TArray<int32>>& Layers, const TArray<int32>& Layer, const TArray<float>& OrderY,
     const TBitArray<>& Pure, FDisjointSets& Dependencies, TArray<int32>& GroupOf, float Spacing,
-    const TArray<FBoundaryExecution>& Boundaries)
+    const TArray<FBoundaryExecution>& Boundaries, const TArray<TOptional<float>>& ConsumerOrder)
 {
     struct FProfile
     {
@@ -328,6 +387,8 @@ void PlacePureDependencies(TArray<FUnit>& Units, const TArray<int32>& Children,
         {
             const int32 GA = Dependencies.Find(A.Key), GB = Dependencies.Find(B.Key);
             if (GA != GB) { return GA < GB; }
+            const float OA = ConsumerOrder[A.Key].Get(MAX_flt), OB = ConsumerOrder[B.Key].Get(MAX_flt);
+            if (OA != OB) { return OA < OB; }
             if (A.Value != B.Value) { return A.Value < B.Value; }
             if (OrderY[A.Key] != OrderY[B.Key]) { return OrderY[A.Key] < OrderY[B.Key]; }
             return A.Key < B.Key;
@@ -552,7 +613,7 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
     FDisjointSets Islands(Count);
     TArray<int32> ReturnCounts;
     ReturnCounts.Init(0, Count);
-    TArray<int32> BoundaryPins;
+    TArray<int32> BoundaryPins, BoundaryData;
     for (const int32 Node : Present)
     {
         for (const int32 EdgeIndex : Graph.Nodes[Node].Outgoing)
@@ -564,6 +625,7 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
             if (B == INDEX_NONE)
             {
                 if (Edge.Kind == ELinkKind::Execution) { BoundaryPins.Add(Edge.From); }
+                else if (Edge.Kind == ELinkKind::Data) { BoundaryData.Add(EdgeIndex); }
                 continue;
             }
             if (A == B)
@@ -736,6 +798,7 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
     }
     TArray<int32> DependencyGroupOf;
     DependencyGroupOf.Init(INDEX_NONE, Count);
+    const auto ConsumerOrder = ExternalConsumerOrder(Graph, Owner, BoundaryData, Edges, Outgoing, Order, Rank, Pure, Dependencies);
     PlaceExecutionChains(Units, Children, Edges, Layer, Order, Rank, OrderY, Pure, Islands, Settings.VerticalSpacing);
     TMap<int32, TArray<FBoundaryExecution>> IslandBoundaries;
     for (const int32 PinIndex : BoundaryPins)
@@ -767,7 +830,7 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
         }
         const auto* Boundaries = IslandBoundaries.Find(Islands.Find(Island[0]));
         PlacePureDependencies(Units, Children, Edges, Outgoing, Layers, Layer, OrderY, Pure, Dependencies, DependencyGroupOf,
-            Settings.VerticalSpacing, Boundaries ? *Boundaries : NoBoundaries);
+            Settings.VerticalSpacing, Boundaries ? *Boundaries : NoBoundaries, ConsumerOrder);
         Events.Reset();
         for (const int32 Node : Island)
         {
