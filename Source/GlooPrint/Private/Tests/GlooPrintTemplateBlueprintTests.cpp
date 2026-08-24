@@ -99,6 +99,7 @@ public:
         }
         if (Phase == 1)
         {
+            CheckPaintedRoutes(TEXT("AuthoredRounded"), Cache->GetRoutes(), false);
             Capture(TEXT("BeforeRounded")); Before = SerializeTransactionValues(*Graph); Properties = DescribeNodes(*Graph);
             TArray<UEdGraph*> Graphs; Blueprint->GetAllGraphs(Graphs);
             for (auto* Other : Graphs) { if (Other != Graph) { OtherGraphs.Add(Other, SerializeTransactionValues(*Other)); } }
@@ -138,7 +139,7 @@ public:
             if (Test.TestTrue(TEXT("Reordered authored links route"), ComputeLayoutRoutes(Shuffled, Cold.Layout, ShuffledRoutes, Reason,
                 bDiagonal ? EGlooPrintWireStyle::Diagonal45 : EGlooPrintWireStyle::Rounded90))) { CheckRoutes(Cold, ShuffledRoutes); }
             RecordMetrics(bDiagonal ? TEXT("FormattedDiagonal") : TEXT("FormattedRounded"), Cold.Snapshot, Cache->GetRoutes());
-            CheckPaintedRoutes(Cache->GetRoutes());
+            CheckPaintedRoutes(bDiagonal ? TEXT("FormattedDiagonal") : TEXT("FormattedRounded"), Cache->GetRoutes());
             Capture(bDiagonal ? TEXT("AfterDiagonal") : TEXT("AfterRounded"));
             Queue = GEditor->Trans->GetQueueLength(); Package->SetDirtyFlag(false); After = SerializeTransactionValues(*Graph);
             BeginFormat(); Phase = bDiagonal ? 6 : 4; return false;
@@ -239,8 +240,9 @@ private:
             Test.TestTrue(TEXT("Authored pin pairs keep exact cold and reordered paths"), Route && Route->Points == Pair.Value.Points);
         }
     }
-    void CheckPaintedRoutes(const FRouteSet& Routes)
+    void CheckPaintedRoutes(const TCHAR* Stage, const FRouteSet& Routes, bool bFormatted = true)
     {
+        FString Curves = TEXT("policy\tfrom_node\tfrom_pin\tto_node\tto_pin\tfrom_label\tto_label\tcached_fallback\tpiece\tp0x\tp0y\tp1x\tp1y\tp2x\tp2y\tp3x\tp3y\n");
         auto* Panel = Editor->GetGraphPanel(); FArrangedChildren Nodes(EVisibility::Visible);
         for (UEdGraphNode* Node : Graph->Nodes)
         {
@@ -250,6 +252,8 @@ private:
         }
         const float Scale = Nodes[0].Geometry.GetAccumulatedLayoutTransform().GetScale();
         const FVector2f Origin = Nodes[0].Geometry.GetAbsolutePosition() - FVector2f(Graph->Nodes[0]->NodePosX, Graph->Nodes[0]->NodePosY) * Scale;
+        if (!Test.TestTrue(TEXT("Drawn-curve export has a finite positive graph scale"), FMath::IsFinite(Scale) && Scale > 0)) { return; }
+        int32 Connections = 0;
         const FSlateRect Clip(-100000, -100000, 100000, 100000);
         for (UEdGraphNode* Node : Graph->Nodes)
         for (UEdGraphPin* Output : Node->Pins)
@@ -276,8 +280,28 @@ private:
                 if (!Test.TestTrue(TEXT("Painted authored connection retains its cached route"), Route != nullptr) ||
                     !Test.TestEqual(TEXT("Native geometry identifies one original connection"), Baseline.Num(), 1) ||
                     !Test.TestTrue(TEXT("Custom drawing keeps the authored connection visible"), !Pieces.IsEmpty())) { continue; }
+                ++Connections;
+                const auto Export = [&](const TCHAR* Policy, const auto& Drawn)
+                {
+                    for (int32 I = 0; I < Drawn.Num(); ++I)
+                    {
+                        const auto& Curve = Drawn[I];
+                        Curves += FString::Printf(TEXT("%s\t%s\t%s\t%s\t%s\t%s.%s\t%s.%s\t%d\t%d"), Policy,
+                            *Node->NodeGuid.ToString(), *Output->PinId.ToString(), *Input->GetOwningNode()->NodeGuid.ToString(), *Input->PinId.ToString(),
+                            *Node->GetName(), *Output->PinName.ToString(), *Input->GetOwningNode()->GetName(), *Input->PinName.ToString(), int32(Route->Fallback), I);
+                        for (const FVector2f Point : {Curve.P0, Curve.P1, Curve.P2, Curve.P3})
+                        {
+                            const FVector2f P = (Point - Origin) / Scale;
+                            Test.TestTrue(TEXT("Every exported drawn control point is finite"), FMath::IsFinite(P.X) && FMath::IsFinite(P.Y));
+                            Curves += FString::Printf(TEXT("\t%.9g\t%.9g"), double(P.X), double(P.Y));
+                        }
+                        Curves += TEXT("\n");
+                    }
+                };
+                Export(TEXT("native"), Baseline); Export(TEXT("glooprint"), Pieces);
                 Test.TestTrue(TEXT("Styled authored wires stay attached to the native pins"),
                     Pieces[0].P0.Equals(Baseline[0].P0, 0.1f) && Pieces.Last().P3.Equals(Baseline[0].P3, 0.1f));
+                if (!bFormatted) { continue; }
                 if (Output->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
                 {
                     Test.TestEqual(TEXT("Authored execution chain draws without a comment detour"), Pieces.Num(), 1);
@@ -301,6 +325,9 @@ private:
                 }
             }
         }
+        Test.TestEqual(TEXT("Drawn-curve export includes every original connection"), Connections, Plan.Snapshot.Edges.Num());
+        Test.TestTrue(TEXT("Save complete native and styled curve controls"),
+            FFileHelper::SaveStringToFile(Curves, *(Directory / (FString(Stage) + TEXT("-drawn-curves.tsv")))));
     }
     void RecordMetrics(const TCHAR* Stage, const FLayoutGraph& Snapshot, const FRouteSet& Routes)
     {
