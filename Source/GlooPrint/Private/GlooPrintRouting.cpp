@@ -464,9 +464,12 @@ bool FRoutingJob::FState::AddEdge(int32 I)
         const FVector2f Attachment = FVector2f(Graph.Nodes[Pin.Node].Geometry.Position) + Pin.Offset.GetValue();
         const FVector2f Terminal = TerminalEnd(PinIndex, Attachment, bOutput);
         if (!Obstacles.ClearLine(Attachment, Terminal, Pin.Node)) { continue; }
-        const int32 Id = Reserved.Add({Attachment, Terminal, bOutput ? PinIndex : INDEX_NONE,
+        FVector2f ReservedEnd = Terminal;
+        ReservedEnd.X += bOutput ? WireLaneSpacing : -WireLaneSpacing;
+        if (!Obstacles.ClearLine(Attachment, ReservedEnd, Pin.Node)) { ReservedEnd = Terminal; }
+        const int32 Id = Reserved.Add({Attachment, ReservedEnd, bOutput ? PinIndex : INDEX_NONE,
             bOutput ? INDEX_NONE : PinIndex, bOutput, !bOutput, true});
-        ReservedHorizontal.Add(FBox2f(TArray<FVector2f>{Attachment, Terminal}).ExpandBy(WireLaneSpacing), Id);
+        ReservedHorizontal.Add(FBox2f(TArray<FVector2f>{Attachment, ReservedEnd}).ExpandBy(WireLaneSpacing), Id);
     }
     Order.Add(I);
     return true;

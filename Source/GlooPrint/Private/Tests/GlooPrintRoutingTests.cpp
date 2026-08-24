@@ -249,6 +249,44 @@ bool FRoutingSharedTerminalTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoutingFractionalSiblingTest, "GlooPrint.Routing.FractionalSharedPinTurn",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoutingFractionalSiblingTest::RunTest(const FString& Parameters)
+{
+    for (const auto Style : {EGlooPrintWireStyle::Rounded90, EGlooPrintWireStyle::Diagonal45})
+    {
+        FLayoutGraph Graph;
+        RouteNode(Graph, {-426, 440}, {42, 24});
+        RouteNode(Graph, {1030, 412}, {42, 24});
+        RouteNode(Graph, {-272, 391}, {215.5f, 76});
+        Graph.Pins[1].Offset = FVector2f(32.5f, 9.5f);
+        Graph.Pins[2].Offset = FVector2f(9.5f, 9.5f);
+        Graph.Pins[4].Offset = FVector2f(10, 58);
+        const auto Far = RouteLink(Graph, 0, 1), Near = RouteLink(Graph, 0, 2);
+        FRouteSet Routes; FString Reason;
+        if (!TestTrue(TEXT("Fractional shared-pin branches compute"), ComputeRoutes(Graph, Routes, Reason, Style))) { AddError(Reason); continue; }
+        TestEqual(TEXT("The distant branch leaves a custom route to the nearby consumer"), Routes.FallbackCount, 0);
+        TestEqual(TEXT("Both original pin pairs remain"), Routes.Wires.Num(), 2);
+        for (const auto& Pair : Routes.Wires) { CheckClear(*this, Graph, Pair.Value); }
+        const auto& Wire = Routes.Wires[Near];
+        if (TestFalse(TEXT("Nearby consumer has an actual custom curve"), Wire.Curves.IsEmpty()))
+        {
+            TestEqual(TEXT("Shared source keeps its fractional attachment"), Wire.Curves[0].Start, FVector2f(-393.5f, 449.5f));
+            TestEqual(TEXT("Nearby consumer keeps its distinct original attachment"), Wire.Curves.Last().End, FVector2f(-262, 449));
+        }
+        Swap(Graph.Edges[0], Graph.Edges[1]); FRouteSet Shuffled;
+        if (TestTrue(TEXT("Reordered fractional branches compute cold"), ComputeRoutes(Graph, Shuffled, Reason, Style)))
+        {
+            for (const auto& Pair : Routes.Wires)
+            {
+                const auto* Cold = Shuffled.Wires.Find(Pair.Key);
+                TestTrue(TEXT("Input enumeration preserves complete branch paths"), Cold && Cold->Points == Pair.Value.Points);
+            }
+        }
+    }
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoutingPinApproachTest, "GlooPrint.Routing.ReservedPinApproaches",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FRoutingPinApproachTest::RunTest(const FString& Parameters)

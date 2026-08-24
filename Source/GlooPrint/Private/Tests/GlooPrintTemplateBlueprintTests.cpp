@@ -286,6 +286,12 @@ private:
                 }
                 if (!Test.TestEqual(TEXT("Live authored geometry draws every cached custom piece"), Pieces.Num(), Route->Curves.Num()))
                 {
+                    if (Route->Points.IsEmpty())
+                    {
+                        Test.AddInfo(FString::Printf(TEXT("Cached fallback %d for %s.%s -> %s.%s"), int32(Route->Fallback),
+                            *Node->GetName(), *Output->PinName.ToString(), *Input->GetOwningNode()->GetName(), *Input->PinName.ToString()));
+                        continue;
+                    }
                     const FVector2f Start = (Baseline[0].P0 + FVector2f(4, 0) - Origin) / Scale;
                     const FVector2f End = (Baseline[0].P3 - FVector2f(4, 0) - Origin) / Scale;
                     Test.AddInfo(FString::Printf(TEXT("Paint fallback %s.%s -> %s.%s; live %s -> %s; cached %s -> %s; start region %s..%s; end region %s..%s"),
