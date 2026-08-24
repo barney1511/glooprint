@@ -28,7 +28,7 @@ bool Inside(FVector2f P, FVector2f Min, FVector2f Max)
 {
     return P.X > Min.X && P.X < Max.X && P.Y > Min.Y && P.Y < Max.Y;
 }
-void CheckClear(FAutomationTestBase& Test, const FLayoutGraph& Graph, const FWireRoute& Route)
+void CheckClear(FAutomationTestBase& Test, const FLayoutGraph& Graph, const FWireRoute& Route, bool bNativePinInsets = false)
 {
     for (const auto& Curve : Route.Curves)
     {
@@ -46,7 +46,15 @@ void CheckClear(FAutomationTestBase& Test, const FLayoutGraph& Graph, const FWir
                         Test.TestFalse(TEXT("Rounded curve clears the comment header"), Inside(P, Position + Header.Min, Position + Header.Max));
                     }
                 }
-                else { Test.TestFalse(TEXT("Rendered curve clears measured bodies"), Inside(P, Position, Position + Node.Geometry.BodySize)); }
+                else
+                {
+                    const bool bOwnStart = bNativePinInsets && Node.Geometry.Id == Route.Key.FromNode && &Curve == &Route.Curves[0] &&
+                        FMath::IsNearlyEqual(P.Y, Curve.Start.Y, 0.001f) && P.X >= Curve.Start.X;
+                    const bool bOwnEnd = bNativePinInsets && Node.Geometry.Id == Route.Key.ToNode && &Curve == &Route.Curves.Last() &&
+                        FMath::IsNearlyEqual(P.Y, Curve.End.Y, 0.001f) && P.X <= Curve.End.X;
+                    Test.TestFalse(TEXT("Rendered curve clears measured bodies outside its own pin insets"),
+                        !bOwnStart && !bOwnEnd && Inside(P, Position, Position + Node.Geometry.BodySize));
+                }
             }
         }
     }
@@ -267,7 +275,8 @@ bool FRoutingFractionalSiblingTest::RunTest(const FString& Parameters)
         if (!TestTrue(TEXT("Fractional shared-pin branches compute"), ComputeRoutes(Graph, Routes, Reason, Style))) { AddError(Reason); continue; }
         TestEqual(TEXT("The distant branch leaves a custom route to the nearby consumer"), Routes.FallbackCount, 0);
         TestEqual(TEXT("Both original pin pairs remain"), Routes.Wires.Num(), 2);
-        for (const auto& Pair : Routes.Wires) { CheckClear(*this, Graph, Pair.Value); }
+        TestTrue(TEXT("Both routes retain their original node and pin identities"), Routes.Wires.Contains(Far) && Routes.Wires.Contains(Near));
+        for (const auto& Pair : Routes.Wires) { CheckClear(*this, Graph, Pair.Value, true); }
         const auto& Wire = Routes.Wires[Near];
         if (TestFalse(TEXT("Nearby consumer has an actual custom curve"), Wire.Curves.IsEmpty()))
         {
