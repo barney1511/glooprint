@@ -32,7 +32,8 @@ namespace GlooPrint::Tests
 class FTemplateBlueprintCheck final : public IAutomationLatentCommand, public FOutputDevice
 {
 public:
-    FTemplateBlueprintCheck(FAutomationTestBase& InTest, const TCHAR* InAssetName) : Test(InTest), AssetName(InAssetName) {}
+    FTemplateBlueprintCheck(FAutomationTestBase& InTest, const TCHAR* InAssetName, bool bInZoomCase = false)
+        : Test(InTest), AssetName(InAssetName), bZoomCase(bInZoomCase) {}
     virtual ~FTemplateBlueprintCheck() { Restore(); }
     virtual bool CanBeUsedOnAnyThread() const override { return true; }
     virtual bool CanBeUsedOnMultipleThreads() const override { return true; }
@@ -59,6 +60,7 @@ public:
         auto* Panel = Editor->GetGraphPanel();
         const auto Cache = Panel->GetMetaData<FRouteCache>();
         if (!Cache || !Cache->IsReady() || bAwaitingFormat) { return false; }
+        if (Phase == 7) { return CheckZoom(*Cache); }
         FString Reason;
         const float Scale = Window->GetDPIScaleFactor() * Slate.GetApplicationScale();
         if (Phase == 0)
@@ -157,9 +159,113 @@ public:
         Test.TestTrue(TEXT("Installed template bytes remain unchanged"), FFileHelper::LoadFileToArray(CurrentSource, *SourcePath) && CurrentSource == SourceBytes);
         Test.TestTrue(TEXT("Private asset file remains an untouched authored baseline"), FFileHelper::LoadFileToArray(CurrentCopy, *CopyPath) && CurrentCopy == SourceBytes);
         Test.TestTrue(TEXT("Save real Blueprint quality metrics"), FFileHelper::SaveStringToFile(Metrics, *(Directory / TEXT("metrics.csv"))));
+        if (bZoomCase)
+        {
+            for (UEdGraphNode* Node : Graph->Nodes)
+            for (UEdGraphPin* Pin : Node->Pins)
+            {
+                if (Pin->Direction != EGPD_Output || Pin->PinName != TEXT("LoopBody") || Pin->LinkedTo.Num() != 1) { continue; }
+                if (!Test.TestNull(TEXT("Zoom fixture identifies one LoopBody connection"), ZoomOutput)) { return Finish(); }
+                ZoomOutput = Pin; ZoomInput = Pin->LinkedTo[0];
+            }
+            if (!Test.TestNotNull(TEXT("Zoom fixture retains the authored LoopBody output"), ZoomOutput)) { return Finish(); }
+            Phase = 7; ZoomIndex = 0; SetZoomView(); return false;
+        }
         return Finish();
     }
 private:
+    void SetZoomView()
+    {
+        auto* Panel = Editor->GetGraphPanel();
+        const float Amount = Panel->GetZoomLevels()->GetZoomAmount(ZoomIndex);
+        const auto OutputNode = Panel->GetNodeWidgetFromGuid(ZoomOutput->GetOwningNode()->NodeGuid);
+        const auto InputNode = Panel->GetNodeWidgetFromGuid(ZoomInput->GetOwningNode()->NodeGuid);
+        const FVector2f Center = (OutputNode->GetPosition2f() + FVector2f(OutputNode->GetDesiredSize().X, 0) + InputNode->GetPosition2f()) * 0.5f;
+        Editor->SetViewLocation(Center - Panel->GetCachedGeometry().GetLocalSize() / (2 * Amount), Amount);
+        Frames = 0;
+    }
+    bool CheckZoom(const FRouteCache& Cache)
+    {
+        auto* Panel = Editor->GetGraphPanel();
+        const float Amount = Panel->GetZoomLevels()->GetZoomAmount(ZoomIndex);
+        const float Scale = Panel->GetCachedGeometry().GetAccumulatedLayoutTransform().GetScale() * Amount;
+        Test.TestEqual(TEXT("Zoom check reaches the requested supported level"), Panel->GetZoomAmount(), Amount);
+        Test.TestTrue(TEXT("Zoom changes no serialized Blueprint values"), After == SerializeTransactionValues(*Graph));
+        Test.TestEqual(TEXT("Zoom creates no undo action"), GEditor->Trans->GetQueueLength(), Queue);
+        Test.TestFalse(TEXT("Zoom leaves the private package clean"), Package->IsDirty());
+        const FRouteKey Key{ZoomOutput->GetOwningNode()->NodeGuid, ZoomOutput->PinId, ZoomInput->GetOwningNode()->NodeGuid, ZoomInput->PinId};
+        const auto* Route = Cache.GetRoutes().Wires.Find(Key);
+        if (!Test.TestTrue(TEXT("Zoom keeps the direct execution route"), Route && Route->Curves.Num() == 1)) { return Finish(); }
+        if (ZoomIndex == 0) { ZoomBuilds = Cache.GetBuildCount(); ZoomPoints = Route->Points; }
+        Test.TestEqual(TEXT("Zoom alone reuses the route cache"), Cache.GetBuildCount(), ZoomBuilds);
+        Test.TestTrue(TEXT("Zoom alone preserves graph-coordinate routes"), Route->Points == ZoomPoints);
+        Test.TestTrue(TEXT("Measured execution pins remain exactly aligned in graph space"),
+            FMath::IsNearlyEqual(Route->Points[0].Y, Route->Points.Last().Y, 0.1f));
+        FArrangedChildren Nodes(EVisibility::Visible);
+        TMap<TSharedRef<SWidget>, FArrangedWidget> Pins;
+        FVector2f Offsets[2]; int32 Endpoint = 0;
+        for (UEdGraphPin* Pin : {ZoomOutput, ZoomInput})
+        {
+            const auto Node = Panel->GetNodeWidgetFromGuid(Pin->GetOwningNode()->NodeGuid);
+            const auto Widget = Node->FindWidgetForPin(Pin);
+            if (!Test.TestTrue(TEXT("Zoom retains the original native pin widget"), Widget.IsValid())) { return Finish(); }
+            const auto& Geometry = Node->GetCachedGeometry();
+            const FVector2f ExpectedOrigin = Panel->GetCachedGeometry().LocalToAbsolute((Node->GetPosition2f() - FVector2f(Panel->GetViewOffset())) * Amount);
+            if (!Test.TestTrue(TEXT("Zoom checks fresh visible node geometry"), Geometry.GetAbsolutePosition().Equals(ExpectedOrigin, 0.1f) &&
+                FMath::IsNearlyEqual(Geometry.GetAccumulatedLayoutTransform().GetScale(), Scale, 0.001f))) { return Finish(); }
+            const auto& PinGeometry = Widget->GetCachedGeometry();
+            const FVector2f PinCenter = PinGeometry.LocalToAbsolute(PinGeometry.GetLocalSize() * 0.5f);
+            const FVector2f PanelPoint = Panel->GetCachedGeometry().AbsoluteToLocal(PinCenter);
+            const FVector2f PanelSize = Panel->GetCachedGeometry().GetLocalSize();
+            if (!Test.TestTrue(TEXT("Both checked pins are visible at every zoom"), PanelPoint.X > 0 && PanelPoint.Y > 0 &&
+                PanelPoint.X < PanelSize.X && PanelPoint.Y < PanelSize.Y)) { return Finish(); }
+            Offsets[Endpoint++] = Geometry.AbsoluteToLocal(PinCenter);
+            Nodes.AddWidget(FArrangedWidget(Node.ToSharedRef(), Geometry));
+            Pins.Add(Widget.ToSharedRef(), FArrangedWidget(Widget.ToSharedRef(), PinGeometry));
+        }
+        FSlateWindowElementList NativeElements(Window), CustomElements(Window);
+        const FSlateRect Clip(-100000, -100000, 100000, 100000);
+        FKismetConnectionDrawingPolicy Native(0, 1, Scale, Clip, NativeElements, Graph);
+        TUniquePtr<FConnectionDrawingPolicy> Custom(FNodeFactory::CreateConnectionPolicy(Graph->GetSchema(), 0, 1, Scale, Clip, CustomElements, Graph));
+        if (!Test.TestTrue(TEXT("Zoom uses the custom connection policy"), Custom.IsValid())) { return Finish(); }
+        Native.SetAbsoluteMousePosition(FVector2f(-100000)); Native.Draw(Pins, Nodes);
+        const auto& Baseline = NativeElements.GetUncachedDrawElements().Get<(uint8)EElementType::ET_Spline>();
+        if (!Test.TestEqual(TEXT("Zoom isolates one native execution wire"), Baseline.Num(), 1)) { return Finish(); }
+        Custom->SetAbsoluteMousePosition((Baseline[0].P0 + Baseline[0].P3) * 0.5f); Custom->Draw(Pins, Nodes);
+        const auto& Pieces = CustomElements.GetUncachedDrawElements().Get<(uint8)EElementType::ET_Spline>();
+        if (!Test.TestEqual(TEXT("Zoom draws the cached single piece without a detour"), Pieces.Num(), 1)) { return Finish(); }
+        Test.TestTrue(TEXT("Zoom keeps exact native wire attachment"), Pieces[0].P0.Equals(Baseline[0].P0, 0.1f) && Pieces[0].P3.Equals(Baseline[0].P3, 0.1f));
+        Test.TestTrue(TEXT("Zoom keeps horizontal departure and arrival tangents"),
+            FMath::IsNearlyEqual(Pieces[0].P0.Y, Pieces[0].P1.Y, 0.1f) && FMath::IsNearlyEqual(Pieces[0].P2.Y, Pieces[0].P3.Y, 0.1f));
+        UEdGraphPin* HitA = nullptr; UEdGraphPin* HitB = nullptr;
+        Test.TestTrue(TEXT("Visible wire hover identifies its original pin pair at every zoom"), Custom->SplineOverlapResult.GetPins(*Panel, HitA, HitB) &&
+            ((HitA == ZoomOutput && HitB == ZoomInput) || (HitA == ZoomInput && HitB == ZoomOutput)));
+        const TCHAR* Style = bZoomRounded ? TEXT("rounded") : TEXT("diagonal");
+        ZoomMetrics += FString::Printf(TEXT("%s,%.3f,%.3f,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n"), Style, double(Amount), double(Scale),
+            int32(Panel->GetCurrentLOD()), double(Offsets[0].Y), double(Offsets[1].Y), double(Baseline[0].P3.Y - Baseline[0].P0.Y),
+            double(Pieces[0].P3.Y - Pieces[0].P0.Y), double((Pieces[0].P0 - Baseline[0].P0).Size()), double((Pieces[0].P3 - Baseline[0].P3).Size()));
+        if (Amount == 0.375f || Amount == 1.f)
+        {
+            TArray<FColor> Pixels; FIntVector Size;
+            if (Test.TestTrue(TEXT("Capture native zoom geometry"), FSlateApplication::Get().TakeScreenshot(Editor.ToSharedRef(), Pixels, Size)))
+            {
+                TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
+                const FString Name = FString::Printf(TEXT("Zoom-%s-%.3f.png"), Style, double(Amount));
+                Test.TestTrue(TEXT("Save zoom capture"), FFileHelper::SaveArrayToFile(Png, *(Directory / Name)));
+            }
+        }
+        if (++ZoomIndex < Panel->GetZoomLevels()->GetNumZoomLevels()) { SetZoomView(); return false; }
+        if (!bZoomRounded)
+        {
+            bZoomRounded = true; ZoomIndex = 0;
+            GetMutableDefault<UGlooPrintSettings>()->WireStyle = EGlooPrintWireStyle::Rounded90;
+            GetMutableDefault<UGlooPrintSettings>()->NotifyChanged(); SetZoomView(); return false;
+        }
+        Test.TestTrue(TEXT("Save native and custom zoom evidence"), FFileHelper::SaveStringToFile(ZoomMetrics, *(Directory / TEXT("zoom.csv"))));
+        Test.AddInfo(FString::Printf(TEXT("Checked %d supported zoom levels in both wire styles; native endpoint deltas and captures: %s"),
+            Panel->GetZoomLevels()->GetNumZoomLevels(), *Directory));
+        return Finish();
+    }
     bool Start()
     {
         bInitialized = true; Deadline = FPlatformTime::Seconds() + 90;
@@ -420,6 +526,12 @@ private:
     TArray<uint8> SourceBytes, Before, After, Defaults;
     FString SourcePath, CopyPath, Directory, Mount, LastMessage;
     FString Metrics = TEXT("stage,nodes,links,fallbacks,bends,aligned_execution,execution_links,route_length,node_width,node_height,envelope_width,envelope_height\n");
+    FString ZoomMetrics = TEXT("style,zoom,draw_scale,lod,output_pin_local_y,input_pin_local_y,native_delta_y,custom_delta_y,start_attachment_error,end_attachment_error\n");
+    UEdGraphPin* ZoomOutput = nullptr;
+    UEdGraphPin* ZoomInput = nullptr;
+    TArray<FVector2f> ZoomPoints;
+    int32 ZoomIndex = 0, ZoomBuilds = 0;
+    bool bZoomCase = false, bZoomRounded = false;
     FVector2f View, CompletedView;
     FBox2f CaptureBounds{ForceInit};
     FIntPoint Anchor;
@@ -434,6 +546,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTemplateSplineMeshTest, "GlooPrint.Editor.Temp
 bool FTemplateSplineMeshTest::RunTest(const FString& Parameters)
 {
     ADD_LATENT_AUTOMATION_COMMAND(FTemplateBlueprintCheck(*this, TEXT("BP_Splinemesh"))); return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTemplateSplineZoomTest, "GlooPrint.Editor.TemplateSplineZoom",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FTemplateSplineZoomTest::RunTest(const FString& Parameters)
+{
+    ADD_LATENT_AUTOMATION_COMMAND(FTemplateBlueprintCheck(*this, TEXT("BP_Splinemesh"), true)); return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTemplateSplineSpawnTest, "GlooPrint.Editor.TemplateSplineSpawn",
