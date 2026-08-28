@@ -15,6 +15,8 @@
 #include "ImageUtils.h"
 #include "Input/HittestGrid.h"
 #include "Misc/FileHelper.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "SGraphPanel.h"
 #include "ScopedTransaction.h"
@@ -178,7 +180,9 @@ bool FRouteContinuationEditorTest::RunTest(const FString& Parameters)
 class FFormatContinuationCheck final : public IAutomationLatentCommand
 {
 public:
-    explicit FFormatContinuationCheck(FAutomationTestBase& InTest, bool bInProgressCase = false) : Test(InTest), bProgressCase(bInProgressCase) {}
+    explicit FFormatContinuationCheck(FAutomationTestBase& InTest, bool bInProgressCase = false)
+        : Test(InTest), bProgressCase(bInProgressCase),
+          bDesktopInput(bInProgressCase && FParse::Param(FCommandLine::Get(), TEXT("GlooPrintDesktopCancel"))) {}
     virtual ~FFormatContinuationCheck() { Restore(); }
     virtual bool Update() override
     {
@@ -208,17 +212,20 @@ public:
                 OriginalCursor = Slate.GetCursorPos();
                 auto& Module = IAutomationDriverModule::Get();
                 if (!Test.TestFalse(TEXT("No other input driver owns the disposable progress fixture"), Module.IsEnabled())) { return Finish(); }
-                Module.Enable(); bOwnDriver = true; Slate.UsePlatformCursorForCursorUser(true);
-                Driver = Module.CreateAsyncDriver(); InputState = MakeShared<FInputState>();
-                InputSequence = Driver->CreateSequence();
-                InputSequence->Actions().Wait(FDriverWaitDelegate::CreateLambda([State = InputState](const FTimespan& Elapsed)
+                if (!bDesktopInput)
                 {
-                    State->bStarted = true;
-                    return State->bStop || Elapsed > FTimespan::FromSeconds(45) ? FDriverWaitResponse::Passed() :
-                        FDriverWaitResponse::Wait(FTimespan::FromMilliseconds(1));
-                }));
-                InputAction = InputSequence->Perform();
-                Slate.SetCursorPos(FVector2D::ZeroVector);
+                    Module.Enable(); bOwnDriver = true; Slate.UsePlatformCursorForCursorUser(true);
+                    Driver = Module.CreateAsyncDriver(); InputState = MakeShared<FInputState>();
+                    InputSequence = Driver->CreateSequence();
+                    InputSequence->Actions().Wait(FDriverWaitDelegate::CreateLambda([State = InputState](const FTimespan& Elapsed)
+                    {
+                        State->bStarted = true;
+                        return State->bStop || Elapsed > FTimespan::FromSeconds(45) ? FDriverWaitResponse::Passed() :
+                            FDriverWaitResponse::Wait(FTimespan::FromMilliseconds(1));
+                    }));
+                    InputAction = InputSequence->Perform();
+                    Slate.SetCursorPos(FVector2D::ZeroVector);
+                }
             }
             Fixture = MakeUnique<FFixture>(UObject::StaticClass(), false, Package.Get());
             Source = Fixture->Add<UK2Node_ExecutionSequence>({0, 0});
@@ -240,10 +247,10 @@ public:
             if (bProgressCase) { Window->BringToFront(true); }
             Editor->SetNodeSelection(Source, true);
             Editor->SetViewLocation(FVector2f(-100, 0), 0.15f);
-            Deadline = FPlatformTime::Seconds() + 45;
+            Deadline = FPlatformTime::Seconds() + (bDesktopInput ? 120 : 45);
             return false;
         }
-        if (FPlatformTime::Seconds() > Deadline) { Test.AddError(TEXT("Native F continuation did not finish in 45 seconds.")); return Finish(); }
+        if (FPlatformTime::Seconds() > Deadline) { Test.AddError(TEXT("Native F continuation exceeded its input/continuation deadline.")); return Finish(); }
         if (++Frames < 12) { return false; }
         if (bProgressCase) { return CheckProgress(); }
         if (Phase == 0)
@@ -327,6 +334,31 @@ public:
         return Finish();
     }
 private:
+    struct FDesktopInput final : IInputProcessor
+    {
+        TWeakPtr<SWidget> Panel, Button;
+        bool bF = false, bDown = false, bUp = false;
+        virtual void Tick(float, FSlateApplication&, TSharedRef<ICursor>) override {}
+        virtual bool HandleKeyDownEvent(FSlateApplication& Slate, const FKeyEvent& Event) override
+        {
+            if (Event.GetKey() == EKeys::F && !Event.IsRepeat() && Slate.GetKeyboardFocusedWidget() == Panel.Pin()) { bF = true; }
+            return false;
+        }
+        bool IsButtonEvent(FSlateApplication& Slate, const FPointerEvent& Event) const
+        {
+            const auto ButtonWidget = Button.Pin();
+            return Event.GetEffectingButton() == EKeys::LeftMouseButton && ButtonWidget &&
+                Slate.LocateWindowUnderMouse(Event.GetScreenSpacePosition(), Slate.GetInteractiveTopLevelWindows(), false, 0).ContainsWidget(ButtonWidget.Get());
+        }
+        virtual bool HandleMouseButtonDownEvent(FSlateApplication& Slate, const FPointerEvent& Event) override
+        {
+            bDown |= IsButtonEvent(Slate, Event); return false;
+        }
+        virtual bool HandleMouseButtonUpEvent(FSlateApplication& Slate, const FPointerEvent& Event) override
+        {
+            bUp |= bDown && IsButtonEvent(Slate, Event); return false;
+        }
+    };
     struct FProgressWidgets
     {
         TSharedPtr<SWindow> Window;
@@ -386,6 +418,7 @@ private:
     }
     bool CheckProgress()
     {
+        if (bDesktopInput) { return CheckDesktopProgress(); }
         auto& Slate = FSlateApplication::Get();
         if (!InputState->bStarted) { return false; }
         if (Phase == 0)
@@ -476,6 +509,65 @@ private:
         Test.TestTrue(TEXT("Native cursor ownership sequence finishes"), InputAction.GetFuture().Get());
         return Finish();
     }
+    bool CheckDesktopProgress()
+    {
+        auto& Slate = FSlateApplication::Get();
+        if (Phase == 0)
+        {
+            Test.TestFalse(TEXT("Desktop fixture leaves Unreal's synthetic input driver disabled"), IAutomationDriverModule::Get().IsEnabled());
+            Test.TestEqual(TEXT("Desktop fixture starts without progress"), FindProgress().Count, 0);
+            Package->SetDirtyFlag(false); Before = SerializeNodes(*Fixture->Graph); Queue = GEditor->Trans->GetQueueLength();
+            PendingTarget = FIntPoint(Target->NodePosX, Target->NodePosY);
+            DesktopInput = MakeShared<FDesktopInput>(); DesktopInput->Panel = Editor->GetGraphPanel()->AsShared();
+            if (!Test.TestTrue(TEXT("Register passive desktop input observer"), Slate.RegisterInputPreProcessor(DesktopInput, 0))) { return Finish(); }
+            Slate.SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
+            Window->SetTitle(FText::FromString(TEXT("GlooPrint desktop Cancel - press F")));
+            Test.AddInfo(TEXT("Desktop input mode: waiting for F and an OS-dispatched Cancel click; no synthetic input driver or supplied pointer path."));
+            Phase = 1; return false;
+        }
+        if (Phase == 1)
+        {
+            if (!DesktopInput->bF) { return false; }
+            StartedAt = FPlatformTime::Seconds(); Phase = 2;
+        }
+        if (!Test.TestEqual(TEXT("Desktop cancellation creates no layout transaction"), GEditor->Trans->GetQueueLength(), Queue) ||
+            !Test.TestEqual(TEXT("Desktop cancellation never applies a partial layout"), FIntPoint(Target->NodePosX, Target->NodePosY), PendingTarget) ||
+            !Test.TestFalse(TEXT("Desktop cancellation leaves the private package clean"), Package->IsDirty())) { return Finish(); }
+        auto Progress = FindProgress();
+        if (Phase == 2)
+        {
+            if (Progress.Item && Progress.Cancel)
+            {
+                DesktopInput->Button = Progress.Cancel;
+                if (!SeenAt) { SeenAt = FPlatformTime::Seconds(); }
+                if (!bDesktopCaptured && FPlatformTime::Seconds() - SeenAt >= 0.6)
+                {
+                    TArray<FColor> Pixels; FIntVector Size;
+                    if (Test.TestTrue(TEXT("Capture desktop Cancel notification"), Slate.TakeScreenshot(Progress.Item.ToSharedRef(), Pixels, Size)))
+                    {
+                        TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
+                        Test.TestTrue(TEXT("Save desktop Cancel capture"), FFileHelper::SaveArrayToFile(Png, *(FPaths::ProjectSavedDir() / TEXT("GlooPrint-DesktopCancel.png"))));
+                    }
+                    bDesktopCaptured = true;
+                }
+            }
+            if (!DesktopInput->bUp)
+            {
+                if (SeenAt && !Test.TestTrue(TEXT("Progress remains usable until desktop release, including while Cancel is pressed"),
+                    Progress.Count == 1 && Progress.Item && Progress.Item->GetCompletionState() == SNotificationItem::CS_Pending)) { return Finish(); }
+                if (!SeenAt && FPlatformTime::Seconds() - StartedAt > 5) { Test.AddError(TEXT("Desktop F did not expose its slow-job notification.")); return Finish(); }
+                return false;
+            }
+            Test.TestTrue(TEXT("Desktop Cancel receives both native press and release"), DesktopInput->bDown && DesktopInput->bUp);
+            Slate.SetKeyboardFocus(Editor->GetGraphPanel()->AsShared(), EFocusCause::SetDirectly);
+            CheckUnchanged(TEXT("OS-dispatched Cancel")); CanceledAt = FPlatformTime::Seconds(); Phase = 3; return false;
+        }
+        if (FPlatformTime::Seconds() - CanceledAt < 1 || Progress.Count != 0) { return false; }
+        CheckUnchanged(TEXT("Desktop cancellation after graph refocus"));
+        Test.TestFalse(TEXT("Desktop check never enabled the synthetic input driver"), IAutomationDriverModule::Get().IsEnabled());
+        Test.AddInfo(TEXT("Desktop F and Cancel press/release observed through normal native window selection; exact graph, package and undo state preserved after refocus."));
+        return Finish();
+    }
     bool PressF(bool bRepeat = false) { return FSlateApplication::Get().ProcessKeyDownEvent(FKeyEvent(EKeys::F, FModifierKeysState(), 0, bRepeat, 0, 0)); }
     void BeginFormat()
     {
@@ -496,6 +588,7 @@ private:
     void Restore()
     {
         if (!bRestore) { return; } bRestore = false;
+        if (DesktopInput) { FSlateApplication::Get().UnregisterInputPreProcessor(DesktopInput); DesktopInput.Reset(); }
         if (Window) { Window->RequestDestroyWindow(); }
         Window.Reset(); Editor.Reset();
         if (InputState) { InputState->bStop = true; }
@@ -514,6 +607,7 @@ private:
     FAutomationTestBase& Test;
     struct FInputState { bool bStarted = false, bStop = false; };
     TSharedPtr<FInputState> InputState;
+    TSharedPtr<FDesktopInput> DesktopInput;
     TSharedPtr<IAsyncAutomationDriver, ESPMode::ThreadSafe> Driver;
     TSharedPtr<IAsyncDriverSequence, ESPMode::ThreadSafe> InputSequence;
     TAsyncResult<bool> InputAction;
@@ -532,6 +626,7 @@ private:
     double Deadline = 0, ActivationDeadline = 0;
     double StartedAt = 0, SeenAt = 0, CanceledAt = 0, InitialMs = 0, CancelMs = 0;
     bool bProgressCase = false, bOwnDriver = false, bRequestedActivation = false;
+    bool bDesktopInput = false, bDesktopCaptured = false;
     bool bRestore = false, bOriginalEnabled = true;
 };
 
