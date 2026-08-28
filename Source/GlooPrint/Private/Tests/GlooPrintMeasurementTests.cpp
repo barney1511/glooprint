@@ -1111,10 +1111,13 @@ bool FBlueprintMenuTest::RunTest(const FString& Parameters)
 class FVisibleGeometryCheck final : public IAutomationLatentCommand
 {
 public:
-    explicit FVisibleGeometryCheck(FAutomationTestBase& InTest, SGraphEditor::EPinVisibility Visibility = SGraphEditor::Pin_Show) : Test(InTest)
+    explicit FVisibleGeometryCheck(FAutomationTestBase& InTest, SGraphEditor::EPinVisibility Visibility = SGraphEditor::Pin_Show, float InLayoutScale = 0)
+        : Test(InTest), RequestedLayoutScale(InLayoutScale)
     {
         Options.PinVisibility = Visibility;
     }
+
+    virtual ~FVisibleGeometryCheck() { RestoreScale(); }
 
     virtual bool Update() override
     {
@@ -1126,7 +1129,15 @@ public:
             Window = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint geometry fixture")))
                 .ClientSize(FVector2f(1280, 850)).FocusWhenFirstShown(false)
                 [ Editor.ToSharedRef() ];
-            FSlateApplication::Get().AddWindow(Window.ToSharedRef());
+            auto& Slate = FSlateApplication::Get();
+            Slate.AddWindow(Window.ToSharedRef());
+            if (RequestedLayoutScale > 0)
+            {
+                OriginalApplicationScale = Slate.GetApplicationScale(); bRestoreScale = true;
+                Slate.SetApplicationScale(RequestedLayoutScale / Window->GetDPIScaleFactor());
+                Test.AddInfo(FString::Printf(TEXT("Painted display-scale fixture: requested %.2f, native DPI %.2f, application scale %.3f, pin mode %d."),
+                    double(RequestedLayoutScale), double(Window->GetDPIScaleFactor()), double(Slate.GetApplicationScale()), int32(Options.PinVisibility)));
+            }
             Editor->SetViewLocation(FVector2f(100000, 100000), 0.25f);
             Editor->SetNodeSelection(Fixture->Branch, true);
             return false;
@@ -1160,6 +1171,8 @@ public:
         }
         FString Reason;
         const float LayoutScale = Editor->GetCachedGeometry().GetAccumulatedLayoutTransform().GetScale();
+        if (RequestedLayoutScale > 0 && !Test.TestTrue(TEXT("Painted editor reaches the requested display scale"),
+            FMath::IsNearlyEqual(LayoutScale, RequestedLayoutScale, 0.001f))) { return Finish(); }
         if (!bMeasuredOffscreen)
         {
             FVector2f Before;
@@ -1266,7 +1279,9 @@ public:
         {
             TArray64<uint8> Png;
             FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
-            const FString Name = Options.PinVisibility == SGraphEditor::Pin_Show ? TEXT("GlooPrint-Geometry.png") :
+            const FString Name = RequestedLayoutScale > 0 ?
+                FString::Printf(TEXT("GlooPrint-Geometry-Scale%.2f-PinMode%d.png"), double(RequestedLayoutScale), int32(Options.PinVisibility)) :
+                Options.PinVisibility == SGraphEditor::Pin_Show ? TEXT("GlooPrint-Geometry.png") :
                 FString::Printf(TEXT("GlooPrint-Geometry-PinMode%d.png"), int32(Options.PinVisibility));
             const FString Path = FPaths::ProjectSavedDir() / Name;
             Test.TestTrue(TEXT("Save fixture screenshot"), FFileHelper::SaveArrayToFile(Png, *Path));
@@ -1276,7 +1291,7 @@ public:
         {
             Test.AddError(TEXT("Could not capture the painted native fixture."));
         }
-        if (Options.PinVisibility != SGraphEditor::Pin_Show)
+        if (Options.PinVisibility != SGraphEditor::Pin_Show || RequestedLayoutScale > 0)
         {
             BeforeFormat = SerializeNodes(*Fixture->Graph);
             FormatQueue = GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount();
@@ -1289,8 +1304,18 @@ public:
     }
 
 private:
+    void RestoreScale()
+    {
+        if (bRestoreScale)
+        {
+            FSlateApplication::Get().SetApplicationScale(OriginalApplicationScale); bRestoreScale = false;
+        }
+    }
     bool Finish()
     {
+        RestoreScale();
+        if (RequestedLayoutScale > 0) { Test.TestEqual(TEXT("Display-scale fixture restores the original application scale"),
+            FSlateApplication::Get().GetApplicationScale(), OriginalApplicationScale); }
         Window->RequestDestroyWindow();
         Editor.Reset();
         Window.Reset();
@@ -1307,7 +1332,9 @@ private:
     FMeasurementOptions Options;
     TArray<uint8> BeforeFormat, Formatted;
     int32 Frames = 0, FormatPhase = 0, FormatQueue = 0;
-    bool bMeasuredOffscreen = false;
+    const float RequestedLayoutScale;
+    float OriginalApplicationScale = 1;
+    bool bMeasuredOffscreen = false, bRestoreScale = false;
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVisibleMeasurementTest, "GlooPrint.Measurement.OffscreenVersusPaintedNative",
@@ -1316,6 +1343,19 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVisibleMeasurementTest, "GlooPrint.Measurement
 bool FVisibleMeasurementTest::RunTest(const FString& Parameters)
 {
     ADD_LATENT_AUTOMATION_COMMAND(FVisibleGeometryCheck(*this));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPaintedDisplayScalesTest, "GlooPrint.Measurement.PaintedDisplayScales",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPaintedDisplayScalesTest::RunTest(const FString& Parameters)
+{
+    for (float Scale : {1.f, 1.25f, 1.5f})
+    for (const auto Visibility : {SGraphEditor::Pin_Show, SGraphEditor::Pin_HideNoConnection, SGraphEditor::Pin_HideNoConnectionNoDefault})
+    {
+        ADD_LATENT_AUTOMATION_COMMAND(FVisibleGeometryCheck(*this, Visibility, Scale));
+    }
     return true;
 }
 
