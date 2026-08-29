@@ -6,6 +6,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "SGraphPanel.h"
+#include "SGraphNode.h"
 #include "Widgets/SWindow.h"
 
 namespace GlooPrint::Tests
@@ -32,7 +33,7 @@ public:
                 auto* Obstacle = Fixture->Add<UK2Node_ExecutionSequence>(Position);
                 for (int32 I = 0; I < 24; ++I) { Obstacle->AddInputPin(); }
             }
-            Gate({100, -100}, 2700, TEXT("Upper search boundary"));
+            Gate({100, 0}, 2700, TEXT("Upper search boundary"));
             Gate({100, 1200}, 2700, TEXT("Lower search boundary"));
             Before = SerializeNodes(*Fixture->Graph);
             Editor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(true);
@@ -47,7 +48,23 @@ public:
         const auto Cache = Panel->GetMetaData<FRouteCache>();
         if (!Cache || !Cache->IsReady()) { return false; }
         const auto* Route = Cache->GetRoutes().Wires.Find(Key);
-        if (!Test.TestTrue(TEXT("Native fixture finds a custom searched route"), Route && Route->Method == ERouteMethod::Search)) { return Finish(); }
+        if (!Test.TestTrue(TEXT("Native fixture finds a custom searched route"), Route && Route->Method == ERouteMethod::Search))
+        {
+            if (Route)
+            {
+                FString Points;
+                for (FVector2f P : Route->Points) { Points += FString::Printf(TEXT(" %.2f:%.2f"), P.X, P.Y); }
+                Test.AddInfo(FString::Printf(TEXT("Unexpected route: method=%d fallback=%d expanded=%d points=%s"),
+                    int32(Route->Method), int32(Route->Fallback), Route->Search.ExpandedStates, *Points));
+            }
+            for (const UEdGraphNode* Node : Fixture->Graph->Nodes)
+            {
+                const auto Widget = Panel->GetNodeWidgetFromGuid(Node->NodeGuid);
+                if (Widget) { Test.AddInfo(FString::Printf(TEXT("Obstacle %s at %d:%d size=%s"),
+                    *Node->GetName(), Node->NodePosX, Node->NodePosY, *Widget->GetDesiredSize().ToString())); }
+            }
+            return Finish();
+        }
         if (++Frames < 8) { return false; }
         if (Phase == 0)
         {
@@ -79,6 +96,7 @@ private:
     {
         auto* Comment = Fixture->Add<UEdGraphNode_Comment>(Position);
         Comment->NodeWidth = Width; Comment->NodeHeight = 110; Comment->NodeComment = Label;
+        for (int32 I = 1; I < 24; ++I) { Comment->NodeComment += TEXT("  "); Comment->NodeComment += Label; }
     }
     bool Finish()
     {
