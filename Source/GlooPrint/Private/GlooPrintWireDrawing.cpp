@@ -224,6 +224,13 @@ public:
         return Cache && Cache->IsReady() ? false : FKismetConnectionDrawingPolicy::IsConnectionCulled(Start, End);
     }
 
+    virtual void DrawSplineWithArrow(const FGeometry& Start, const FGeometry& End, const FConnectionParams& Params) override
+    {
+        const TGuardValue<bool> StartGuard(bSynthesizedStart, Start.GetLocalSize().IsZero());
+        const TGuardValue<bool> EndGuard(bSynthesizedEnd, End.GetLocalSize().IsZero());
+        FKismetConnectionDrawingPolicy::DrawSplineWithArrow(Start, End, Params);
+    }
+
     virtual void DrawConnection(int32 Layer, const FVector2f& Start, const FVector2f& End, const FConnectionParams& Params) override
     {
         const auto Owner = Panel.Pin();
@@ -245,8 +252,8 @@ public:
         {
             return PaintOrigin + P * ZoomFactor;
         };
-        const FVector2f PinStart = (Start + FVector2f(4, 0) - PaintOrigin) / Scale;
-        const FVector2f PinEnd = (End - FVector2f(4, 0) - PaintOrigin) / Scale;
+        const FVector2f PinStart = bSynthesizedStart ? Route->Curves[0].Start : (Start + FVector2f(4, 0) - PaintOrigin) / Scale;
+        const FVector2f PinEnd = bSynthesizedEnd ? Route->Curves.Last().End : (End - FVector2f(4, 0) - PaintOrigin) / Scale;
         const auto Contains = [](const FBox2f& Region, FVector2f Point)
         {
             return Region.bIsValid && Point.X >= Region.Min.X && Point.X <= Region.Max.X &&
@@ -373,6 +380,7 @@ private:
     TSharedPtr<FRouteCache> Cache;
     TArray<FSimpleConnectionData> HitPieces;
     FVector2f PaintOrigin = FVector2f::ZeroVector;
+    bool bSynthesizedStart = false, bSynthesizedEnd = false;
 };
 }
 
