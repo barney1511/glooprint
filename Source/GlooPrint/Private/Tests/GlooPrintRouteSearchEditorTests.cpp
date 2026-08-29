@@ -22,26 +22,23 @@ public:
             OriginalCursor = Slate.GetCursorPos();
             Fixture = MakeUnique<FFixture>(UObject::StaticClass(), false);
             Fixture->Branch = Fixture->Add<UK2Node_IfThenElse>({0, 300});
-            auto* Target = Fixture->Add<UK2Node_ExecutionSequence>({1400, 300});
+            auto* Target = Fixture->Add<UK2Node_ExecutionSequence>({2500, 300});
             Output = Fixture->Branch->FindPinChecked(UEdGraphSchema_K2::PN_Then);
             Input = Target->FindPinChecked(UEdGraphSchema_K2::PN_Execute);
             GetDefault<UEdGraphSchema_K2>()->TryCreateConnection(Output, Input);
             Key = {Fixture->Branch->NodeGuid, Output->PinId, Target->NodeGuid, Input->PinId};
-            Fixture->Print = NewObject<UK2Node_CallFunction>(Fixture->Graph);
-            Fixture->Print->SetFromFunction(UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("PrintString")));
-            Fixture->Initialize(*Fixture->Print, {680, 180});
-            Fixture->Print->PostPlacedNewNode();
-            Fixture->Print->AdvancedPinDisplay = ENodeAdvancedPins::Shown;
-            Fixture->Print->FindPinChecked(TEXT("InString"))->DefaultValue = TEXT("A measured body obstacle");
-            Gate({100, 260}, 400, TEXT("Upper source gate"));
-            Gate({100, 440}, 400, TEXT("Lower source gate"));
-            Gate({1120, 260}, 450, TEXT("Upper destination gate"));
-            Gate({1120, 470}, 450, TEXT("Lower destination gate"));
+            for (const FVector2f Position : {FVector2f(600, -50), FVector2f(1200, 550), FVector2f(1800, -50)})
+            {
+                auto* Obstacle = Fixture->Add<UK2Node_ExecutionSequence>(Position);
+                for (int32 I = 0; I < 24; ++I) { Obstacle->AddInputPin(); }
+            }
+            Gate({100, -100}, 2700, TEXT("Upper search boundary"));
+            Gate({100, 1200}, 2700, TEXT("Lower search boundary"));
             Before = SerializeNodes(*Fixture->Graph);
             Editor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(true);
             Window = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint searched route"))).ClientSize(FVector2f(1200, 850))[Editor.ToSharedRef()];
             Slate.AddWindow(Window.ToSharedRef());
-            Editor->SetViewLocation(FVector2f(-100, 100), 0.65f);
+            Editor->SetViewLocation(FVector2f(-100, -150), 0.42f);
             Deadline = FPlatformTime::Seconds() + 30;
             return false;
         }

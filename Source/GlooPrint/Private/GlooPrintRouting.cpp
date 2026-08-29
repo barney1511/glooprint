@@ -19,6 +19,13 @@ constexpr int32 MaxChannels = RouteChannelLimit;
 constexpr int32 MaxSearchExpansions = 2048;
 constexpr double BendCost = 24;
 
+FBox2f SegmentBounds(FVector2f A, FVector2f B)
+{
+    FBox2f Box(A, A);
+    Box += B;
+    return Box;
+}
+
 struct FObstacle
 {
     FBox2f Box;
@@ -30,6 +37,11 @@ class FObstacles
 public:
     TArray<FObstacle> Items;
     FBox2f Bounds = FBox2f(ForceInit);
+
+    void Reserve(int32 Count)
+    {
+        Items.Reserve(Count); Visited.Reserve(Count);
+    }
 
     void Add(FBox2f Box, int32 Node)
     {
@@ -65,7 +77,7 @@ public:
     bool ClearLine(FVector2f A, FVector2f B, int32 IgnoreNode = INDEX_NONE) const
     {
         if (A.X != B.X && A.Y != B.Y) { return false; }
-        const FBox2f Box(TArray<FVector2f>{A, B});
+        const FBox2f Box = SegmentBounds(A, B);
         return Query(Box, [this, A, B, IgnoreNode](int32 Index)
         {
             const auto& O = Items[Index];
@@ -163,20 +175,19 @@ bool ValidPoint(FVector2f P)
 
 void Simplify(TArray<FVector2f>& Points)
 {
-    TArray<FVector2f> Result;
-    Result.Reserve(Points.Num());
+    int32 Count = 0;
     for (FVector2f P : Points)
     {
-        if (!Result.IsEmpty() && P == Result.Last()) { continue; }
-        while (Result.Num() >= 2)
+        if (Count > 0 && P == Points[Count - 1]) { continue; }
+        while (Count >= 2)
         {
-            const FVector2f A = Result.Last() - Result[Result.Num() - 2], B = P - Result.Last();
+            const FVector2f A = Points[Count - 1] - Points[Count - 2], B = P - Points[Count - 1];
             if (A.X * B.Y != A.Y * B.X || FVector2f::DotProduct(A, B) < 0) { break; }
-            Result.Pop(EAllowShrinking::No);
+            --Count;
         }
-        Result.Add(P);
+        Points[Count++] = P;
     }
-    Points = MoveTemp(Result);
+    Points.SetNum(Count, EAllowShrinking::No);
 }
 
 void AddCurve(FWireRoute& Route, FVector2f A, FVector2f B, FVector2f TA, FVector2f TB)
@@ -191,6 +202,7 @@ void AddCurve(FWireRoute& Route, FVector2f A, FVector2f B, FVector2f TA, FVector
 void StyleRoute(FWireRoute& Route, const FObstacles& Obstacles, EGlooPrintWireStyle Style)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_StyleRoute);
+    Route.Curves.Reserve(2 * Route.Points.Num() - 3);
     FVector2f Start = Route.Points[0];
     for (int32 I = 1; I + 1 < Route.Points.Num(); ++I)
     {
@@ -201,7 +213,8 @@ void StyleRoute(FWireRoute& Route, const FObstacles& Obstacles, EGlooPrintWireSt
         float Radius = FMath::Min3(bDiagonal ? 32.f : CornerRadius, Incoming.Size() * 0.5f, Outgoing.Size() * 0.5f);
         for (int32 Attempt = 0; Radius > 0; ++Attempt)
         {
-            const FBox2f Hull(TArray<FVector2f>{Corner - U * Radius, Corner, Corner + V * Radius});
+            FBox2f Hull = SegmentBounds(Corner - U * Radius, Corner + V * Radius);
+            Hull += Corner;
             if (Obstacles.ClearBox(Hull)) { break; }
             Radius = Attempt < 5 ? Radius * 0.5f : 0;
         }
@@ -227,16 +240,15 @@ bool OrderChannels(TArray<float>& Channels, float Center)
         const float DA = FMath::Abs(A - Center), DB = FMath::Abs(B - Center);
         return DA != DB ? DA < DB : A < B;
     });
-    TArray<float> Unique;
-    Unique.Reserve(FMath::Min(MaxChannels, Channels.Num()));
+    int32 Count = 0;
     bool bTruncated = false;
     for (float Value : Channels)
     {
-        if (!Unique.IsEmpty() && Unique.Last() == Value) { continue; }
-        if (Unique.Num() == MaxChannels) { bTruncated = true; break; }
-        Unique.Add(Value);
+        if (Count > 0 && Channels[Count - 1] == Value) { continue; }
+        if (Count == MaxChannels) { bTruncated = true; break; }
+        Channels[Count++] = Value;
     }
-    Channels = MoveTemp(Unique);
+    Channels.SetNum(Count, EAllowShrinking::No);
     return bTruncated;
 }
 
@@ -381,6 +393,11 @@ struct FRoutingJob::FState
             Max = Max.IsSet() ? FMath::Max(Max.GetValue(), X) : X;
         }
     };
+    struct FTurn
+    {
+        FVector2f Stem, Step, Corner;
+        double LocalCost;
+    };
     FLayoutGraph Graph;
     EGlooPrintWireStyle Style;
     EPhase Phase = EPhase::Nodes;
@@ -394,6 +411,9 @@ struct FRoutingJob::FState
     TBitArray<> PendingPinApproaches;
     FObstacles ReservedHorizontal, ReservedVertical;
     FSearchScratch SearchWork;
+    TArray<float> XChannels, YChannels, Frontier, TurnChannels;
+    TArray<FTurn> Departures, Approaches;
+    TArray<FVector2f> BestPoints, SearchPath, SearchCandidate;
     TArray<FPinTurns> PinTurns;
     int32 NextNode = 0, NextEdge = 0, NextRoute = 0;
     bool bTaken = false;
@@ -406,6 +426,10 @@ struct FRoutingJob::FState
         }
         Bodies.Reserve(Graph.Nodes.Num()); Order.Reserve(Graph.Edges.Num());
         Result.Wires.Reserve(Graph.Edges.Num());
+        Obstacles.Reserve(Graph.Nodes.Num());
+        Reserved.Reserve(Graph.Edges.Num());
+        XChannels.Reserve(2 + MaxChannels * 2); YChannels.Reserve(1 + MaxChannels * 3);
+        Frontier.Reserve(12); TurnChannels.Reserve(MaxChannels + 2);
         FanOut.Init(0, Graph.Pins.Num()); FanIn.Init(0, Graph.Pins.Num());
         PinTurns.SetNum(Graph.Pins.Num());
         PendingPinApproaches.Init(false, Graph.Pins.Num());
@@ -469,7 +493,7 @@ bool FRoutingJob::FState::AddEdge(int32 I)
         if (!Obstacles.ClearLine(Attachment, ReservedEnd, Pin.Node)) { ReservedEnd = Terminal; }
         const int32 Id = Reserved.Add({Attachment, ReservedEnd, bOutput ? PinIndex : INDEX_NONE,
             bOutput ? INDEX_NONE : PinIndex, bOutput, !bOutput, true});
-        ReservedHorizontal.Add(FBox2f(TArray<FVector2f>{Attachment, ReservedEnd}).ExpandBy(WireLaneSpacing), Id);
+        ReservedHorizontal.Add(SegmentBounds(Attachment, ReservedEnd).ExpandBy(WireLaneSpacing), Id);
     }
     Order.Add(I);
     return true;
@@ -558,7 +582,7 @@ void FRoutingJob::FState::RouteOne(int32 Index)
         if (!Obstacles.ClearLine(A, B, Ignore)) { return false; }
         if (A == B) { return true; }
         const auto& Reservations = A.Y == B.Y ? ReservedHorizontal : ReservedVertical;
-        return Reservations.Query(FBox2f(TArray<FVector2f>{A, B}), [&](int32 ReservedId)
+        return Reservations.Query(SegmentBounds(A, B), [&](int32 ReservedId)
         {
             const auto& R = Reserved[Reservations.Items[ReservedId].Node];
             if (R.bPinApproach && !PendingPinApproaches[R.bFirst ? R.From : R.To]) { return true; }
@@ -576,13 +600,15 @@ void FRoutingJob::FState::RouteOne(int32 Index)
             return true;
         });
     };
-    auto Accept = [&](TArray<FVector2f> Candidate)
+    auto Accept = [&](TConstArrayView<FVector2f> Candidate)
     {
         for (int32 I = 1; I < Candidate.Num(); ++I)
         {
             if (!ClearSegment(Candidate[I - 1], Candidate[I], I == 1, I == Candidate.Num() - 1)) { return false; }
         }
-        Simplify(Candidate); Route.Points = MoveTemp(Candidate); return true;
+        Route.Points.Reset(Candidate.Num());
+        Route.Points.Append(Candidate.GetData(), Candidate.Num());
+        Simplify(Route.Points); return true;
     };
     bool bFound = false;
     if (Start.Y == End.Y && Start.X < End.X)
@@ -607,7 +633,8 @@ void FRoutingJob::FState::RouteOne(int32 Index)
         {
             bFound = TryDogleg(MiddleX);
         }
-        TArray<float> XChannels{Exit.X, Entry.X}, YChannels{(Start.Y + End.Y) * 0.5f};
+        XChannels.Reset(); XChannels.Append({Exit.X, Entry.X});
+        YChannels.Reset(); YChannels.Add((Start.Y + End.Y) * 0.5f);
         if (!bFound)
         {
             {
@@ -621,7 +648,7 @@ void FRoutingJob::FState::RouteOne(int32 Index)
             }
             if (!bFound && Exit.X <= Entry.X)
             {
-                TArray<float> Frontier;
+                Frontier.Reset();
                 for (int32 Pin : {Edge.From, Edge.To})
                 {
                     const auto& Turns = PinTurns[Pin];
@@ -654,15 +681,10 @@ void FRoutingJob::FState::RouteOne(int32 Index)
             }
             if (!bFound)
             {
-                struct FTurn
+                const auto Turns = [&](FVector2f Terminal, bool bOutput, TArray<FTurn>& Options)
                 {
-                    FVector2f Stem, Step, Corner;
-                    double LocalCost;
-                };
-                const auto Turns = [&](FVector2f Terminal, bool bOutput)
-                {
-                    TArray<FTurn> Options;
-                    TArray<float> TurnChannels = XChannels;
+                    Options.Reset();
+                    TurnChannels.Reset(); TurnChannels.Append(XChannels);
                     TurnChannels.AddUnique(Terminal.X - WireLaneSpacing);
                     TurnChannels.AddUnique(Terminal.X + WireLaneSpacing);
                     for (float Extension : {0.f, WireLaneSpacing})
@@ -683,10 +705,9 @@ void FRoutingJob::FState::RouteOne(int32 Index)
                             }
                         }
                     }
-                    return Options;
                 };
-                const auto Departures = Turns(Exit, true), Approaches = Turns(Entry, false);
-                double BestCost = TNumericLimits<double>::Max(); TArray<FVector2f> BestPoints;
+                Turns(Exit, true, Departures); Turns(Entry, false, Approaches);
+                double BestCost = TNumericLimits<double>::Max(); BestPoints.Reset();
                 for (float Y : YChannels)
                 {
                     const double MinimumLength = FMath::Abs(double(Start.X) - End.X) + FMath::Abs(double(Start.Y) - Y) + FMath::Abs(double(End.Y) - Y);
@@ -714,25 +735,25 @@ void FRoutingJob::FState::RouteOne(int32 Index)
                     {
                         Cost += FMath::Abs(double(Route.Points[I].X) - Route.Points[I - 1].X) + FMath::Abs(double(Route.Points[I].Y) - Route.Points[I - 1].Y);
                     }
-                    if (Cost < BestCost) { BestCost = Cost; BestPoints = Route.Points; }
+                    if (Cost < BestCost) { BestCost = Cost; BestPoints.Reset(); BestPoints.Append(Route.Points); }
                 }
-                Route.Points = MoveTemp(BestPoints); bFound = !Route.Points.IsEmpty();
+                Route.Points.Reset(); Route.Points.Append(BestPoints); bFound = !Route.Points.IsEmpty();
             }
             if (!bFound)
             {
-                SearchWork.X = XChannels; SearchWork.Y = YChannels;
+                SearchWork.X.Reset(); SearchWork.X.Append(XChannels);
+                SearchWork.Y.Reset(); SearchWork.Y.Append(YChannels);
                 for (const auto& O : Obstacles.Items)
                 {
                     SearchWork.X.Add(O.Box.Min.X); SearchWork.X.Add(O.Box.Max.X);
                     SearchWork.Y.Add(O.Box.Min.Y); SearchWork.Y.Add(O.Box.Max.Y);
                 }
-                TArray<FVector2f> Path;
                 if (SearchChannels(Exit, Entry, SearchWork,
-                    [&](FVector2f A, FVector2f B) { return ClearSegment(A, B, false, false); }, Route.Search, Path))
+                    [&](FVector2f A, FVector2f B) { return ClearSegment(A, B, false, false); }, Route.Search, SearchPath))
                 {
-                    TArray<FVector2f> Candidate; Candidate.Reserve(Path.Num() + 2);
-                    Candidate.Add(Start); Candidate.Append(Path); Candidate.Add(End);
-                    bFound = Accept(MoveTemp(Candidate));
+                    SearchCandidate.Reset(SearchPath.Num() + 2);
+                    SearchCandidate.Add(Start); SearchCandidate.Append(SearchPath); SearchCandidate.Add(End);
+                    bFound = Accept(SearchCandidate);
                     if (bFound) { Route.Method = ERouteMethod::Search; }
                 }
             }
@@ -842,7 +863,7 @@ void FRoutingJob::FState::RouteOne(int32 Index)
             const FVector2f A = Route.Points[I - 1], B = Route.Points[I];
             const int32 Id = Reserved.Add({A, B, Edge.From, Edge.To, I == 1, I == Route.Points.Num() - 1});
             auto& Reservations = A.Y == B.Y ? ReservedHorizontal : ReservedVertical;
-            Reservations.Add(FBox2f(TArray<FVector2f>{A, B}).ExpandBy(WireLaneSpacing), Id);
+            Reservations.Add(SegmentBounds(A, B).ExpandBy(WireLaneSpacing), Id);
             if (A.X == B.X)
             {
                 ReservedX.Add(A.X - WireLaneSpacing); ReservedX.Add(A.X + WireLaneSpacing);
