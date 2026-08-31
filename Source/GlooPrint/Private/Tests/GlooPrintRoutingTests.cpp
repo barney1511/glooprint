@@ -1,6 +1,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include "GlooPrintRouting.h"
 #include "GlooPrintRouteChannels.h"
+#include "GlooPrintObstacleIndex.h"
 #include "Misc/AutomationTest.h"
 
 namespace GlooPrint::Tests
@@ -63,6 +64,38 @@ void CheckClear(FAutomationTestBase& Test, const FLayoutGraph& Graph, const FWir
         Test.TestEqual(TEXT("Rendered pieces meet exactly"), Route.Curves[I - 1].End, Route.Curves[I].Start);
     }
 }
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrowingObstacleTest, "GlooPrint.Routing.GrowingTerminalIndex",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FGrowingObstacleTest::RunTest(const FString& Parameters)
+{
+    Routing::FObstacles Index;
+    const int32 Id = Index.Add(FBox2f({0, 244}, {100, 268}), 7);
+    for (const FBox2f Box : {FBox2f({-300, 244}, {600, 268}),
+        FBox2f({-40000, 244}, {40000, 268}), FBox2f({-100000, 244}, {100000, 268})})
+    {
+        Index.GrowHorizontal(Id, Box);
+        for (float X : {Box.Min.X + 1, 50.f, Box.Max.X - 1})
+        {
+            TestFalse(TEXT("New and old columns block crossing lines"), Index.ClearLine({X, 200}, {X, 300}));
+            TestTrue(TEXT("Ignored node still permits crossing"), Index.ClearLine({X, 200}, {X, 300}, 7));
+        }
+        TestTrue(TEXT("Growth does not fill unrelated rows"), Index.ClearLine({Box.Min.X, 280}, {Box.Max.X, 280}));
+        TestTrue(TEXT("Inflated boundaries remain touchable"), Index.ClearLine({Box.Min.X, 244}, {Box.Max.X, 244}));
+        TestTrue(TEXT("A line beyond the expanded interval stays clear"),
+            Index.ClearLine({Box.Max.X + 1, 200}, {Box.Max.X + 1, 300}));
+        Index.GrowHorizontal(Id, Box);
+        for (const FBox2f Query : {FBox2f({40, 250}, {60, 260}),
+            FBox2f({40, -100000}, {60, 100000})})
+        {
+            int32 Visits = 0;
+            Index.Query(Query, [&](int32 Found) { TestEqual(TEXT("Stable obstacle identity"), Found, Id); ++Visits; return true; });
+            TestEqual(TEXT("Grid/axis/spill entries visit an expanded obstacle only once"), Visits, 1);
+        }
+    }
+    TestEqual(TEXT("Expansion retains one obstacle"), Index.Items.Num(), 1);
+    return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRouteCoordinateTest, "GlooPrint.Routing.ChannelCoordinateBounds",
