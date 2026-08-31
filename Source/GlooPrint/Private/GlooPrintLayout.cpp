@@ -128,7 +128,7 @@ struct FUnit
     int32 Comment = INDEX_NONE;
     int32 Parent = INDEX_NONE;
     TArray<int32> Children;
-    TArray<FMember> Members;
+    TArray<FMember, TInlineAllocator<1>> Members;
     FMeasuredRect Bounds;
     FVector2f Position = FVector2f::ZeroVector;
     FVector2f Size = FVector2f::ZeroVector;
@@ -498,9 +498,17 @@ void PlacePureDependencies(TArray<FUnit>& Units, const TArray<int32>& Children,
     }
 }
 
-void Collect(const TArray<FUnit>& Units, int32 Root, TArray<FMember>& OutMembers)
+struct FLayoutScratch
 {
+    TArray<FMember> Members;
     TArray<TPair<int32, FVector2f>> Stack;
+    TArray<float> Neighbors;
+};
+
+void Collect(const TArray<FUnit>& Units, int32 Root, FLayoutScratch& Scratch)
+{
+    auto& OutMembers = Scratch.Members; OutMembers.Reset();
+    auto& Stack = Scratch.Stack; Stack.Reset();
     Stack.Emplace(Root, FVector2f::ZeroVector);
     while (!Stack.IsEmpty())
     {
@@ -574,7 +582,7 @@ uint64 CountOrderingCrossings(const TArray<FUnit>& Units, const TArray<int32>& C
 }
 
 TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutSettings& Settings,
-    TArray<FUnit>& Units, TArray<int32> Children, int32 OrderingSweeps, uint64& OutCrossings)
+    TArray<FUnit>& Units, TArray<int32> Children, int32 OrderingSweeps, uint64& OutCrossings, FLayoutScratch& Scratch)
 {
     Children.RemoveAll([&](int32 I) { return Units[I].bFixed; });
     Children.Sort([&](int32 A, int32 B) { return Units[A].Key < Units[B].Key; });
@@ -591,9 +599,8 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
     {
         const FUnit& Unit = Units[Children[I]];
         Pure[I] = !Unit.bRigid && (Unit.Comment != INDEX_NONE || Unit.Members.Num() == 1);
-        TArray<FMember> Members;
-        Collect(Units, Children[I], Members);
-        for (const FMember& Member : Members)
+        Collect(Units, Children[I], Scratch);
+        for (const FMember& Member : Scratch.Members)
         {
             Owner[Member.Node] = I;
             Offset[Member.Node] = Member.Offset;
@@ -756,8 +763,8 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
                 for (const int32 Node : Layers[L])
                 {
                     PinOrder[Node] = 0; PinY[Node] = 0;
-                    TArray<float> Neighbors;
                     const TArray<int32>& Links = bForward ? Incoming[Node] : Outgoing[Node];
+                    auto& Neighbors = Scratch.Neighbors; Neighbors.Reset(Links.Num());
                     int32 Dominant = INDEX_NONE;
                     for (const int32 E : Links)
                     {
@@ -927,7 +934,7 @@ TOptional<FMeasuredRect> PlaceChildren(const FLayoutGraph& Graph, const FLayoutS
 }
 
 static bool ComputeLayoutCandidate(const FLayoutGraph& Graph, const FLayoutSettings& Settings, int32 OrderingSweeps,
-    FLayoutResult& OutResult, FString& OutReason, ELayoutFailure* OutFailure)
+    FLayoutResult& OutResult, FString& OutReason, ELayoutFailure* OutFailure, FLayoutScratch& Scratch)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_Layout);
     OutResult = FLayoutResult(); OutReason.Reset();
@@ -1099,7 +1106,7 @@ static bool ComputeLayoutCandidate(const FLayoutGraph& Graph, const FLayoutSetti
         FUnit& Unit = Units[Ready[Head]];
         if (Unit.Comment != INDEX_NONE)
         {
-            const auto ContentBounds = PlaceChildren(Graph, Settings, Units, Unit.Children, OrderingSweeps, Result.OrderingCrossings);
+            const auto ContentBounds = PlaceChildren(Graph, Settings, Units, Unit.Children, OrderingSweeps, Result.OrderingCrossings, Scratch);
             if (!ContentBounds.IsSet())
             {
                 OutReason = TEXT("A comment contains only fixed regions; its grouping cannot yet be safely reformatted."); return false;
@@ -1117,7 +1124,7 @@ static bool ComputeLayoutCandidate(const FLayoutGraph& Graph, const FLayoutSetti
         if (Unit.Parent != INDEX_NONE && --Remaining[Unit.Parent] == 0) { Ready.Add(Unit.Parent); }
     }
     if (Ready.Num() != Units.Num()) { OutReason = TEXT("Comment membership contains a cycle."); return false; }
-    PlaceChildren(Graph, Settings, Units, Roots, OrderingSweeps, Result.OrderingCrossings);
+    PlaceChildren(Graph, Settings, Units, Roots, OrderingSweeps, Result.OrderingCrossings, Scratch);
     if (Result.OrderingCrossings == MAX_uint64)
     {
         if (OutFailure) { *OutFailure = ELayoutFailure::Constraints; }
@@ -1128,9 +1135,8 @@ static bool ComputeLayoutCandidate(const FLayoutGraph& Graph, const FLayoutSetti
     TBitArray<> Fixed(false, Count);
     for (const int32 Root : Roots)
     {
-        TArray<FMember> Members;
-        Collect(Units, Root, Members);
-        for (const FMember& Member : Members)
+        Collect(Units, Root, Scratch);
+        for (const FMember& Member : Scratch.Members)
         {
             Proposed[Member.Node] = Member.Offset + Units[Root].Position;
             Fixed[Member.Node] = Units[Root].bFixed;
@@ -1200,6 +1206,7 @@ struct FLayoutJob::FState
 {
     FLayoutGraph Graph;
     FLayoutSettings Settings;
+    FLayoutScratch Scratch;
     FLayoutResult Best;
     TOptional<uint64> LastCrossings;
     FString Reason;
@@ -1220,7 +1227,7 @@ bool FLayoutJob::Advance(double Deadline)
     do
     {
         FLayoutResult Candidate;
-        if (!ComputeLayoutCandidate(State->Graph, State->Settings, State->NextSweep, Candidate, State->Reason, &State->Failure))
+        if (!ComputeLayoutCandidate(State->Graph, State->Settings, State->NextSweep, Candidate, State->Reason, &State->Failure, State->Scratch))
         {
             if (State->Failure == ELayoutFailure::InvalidInput) { State->bDone = true; return true; }
         }
