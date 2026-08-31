@@ -268,7 +268,7 @@ struct FRoutingJob::FState
     TArray<FReservedSegment> Reserved;
     struct FTerminalReservation { int32 Segment, Obstacle; };
     TMap<int32, FTerminalReservation> TerminalReservations;
-    TBitArray<> PendingPinApproaches;
+    TBitArray<> PendingPinApproaches, SharedPins;
     FObstacles ReservedHorizontal, ReservedVertical;
     FSearchScratch SearchWork;
     TArray<float> XChannels, YChannels, Frontier, TurnChannels;
@@ -292,7 +292,7 @@ struct FRoutingJob::FState
         Frontier.Reserve(12); TurnChannels.Reserve(MaxChannels + 2);
         FanOut.Init(0, Graph.Pins.Num()); FanIn.Init(0, Graph.Pins.Num());
         PinTurns.SetNum(Graph.Pins.Num());
-        PendingPinApproaches.Init(false, Graph.Pins.Num());
+        PendingPinApproaches.Init(false, Graph.Pins.Num()); SharedPins.Init(false, Graph.Pins.Num());
     }
     bool AddNode(int32 I);
     bool AddEdge(int32 I);
@@ -342,7 +342,7 @@ bool FRoutingJob::FState::AddEdge(int32 I)
     }
     for (int32 PinIndex : {E.From, E.To})
     {
-        if (PendingPinApproaches[PinIndex]) { continue; }
+        if (PendingPinApproaches[PinIndex]) { SharedPins[PinIndex] = true; continue; }
         PendingPinApproaches[PinIndex] = true;
         const auto& Pin = Graph.Pins[PinIndex];
         const bool bOutput = PinIndex == E.From;
@@ -426,8 +426,8 @@ void FRoutingJob::FState::Step()
 void FRoutingJob::FState::ReserveSegment(FVector2f A, FVector2f B, int32 From, int32 To, bool bFirst, bool bLast)
 {
     const bool bHorizontal = A.Y == B.Y;
-    const bool bTerminal = bHorizontal && A.X < B.X && (bFirst != bLast);
     const int32 Pin = bFirst ? From : To;
+    const bool bTerminal = bHorizontal && A.X < B.X && (bFirst != bLast) && SharedPins[Pin];
     if (bTerminal)
     {
         if (const auto* Existing = TerminalReservations.Find(Pin))
