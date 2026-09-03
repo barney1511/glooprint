@@ -428,7 +428,9 @@ bool FMeasurementJob::Advance(double Deadline)
     if (S.bDone) { return true; }
     const auto Fail = [&S](const TCHAR* Reason) { S.Reason = Reason; S.bDone = true; return true; };
     UEdGraph* Graph = S.Graph.Get();
+    const double ValidationStarted = FPlatformTime::Seconds();
     if (!ValidateMeasurementGraph(Graph, S.Reason)) { S.bDone = true; return true; }
+    Deadline += FPlatformTime::Seconds() - ValidationStarted;
     const auto Cache = S.Cache.Pin();
     if (S.bHasCache && !Cache) { return Fail(TEXT("The measurement cache was closed.")); }
     if (!S.bStarted)

@@ -67,7 +67,7 @@ public:
     explicit FRoutingJob(FLayoutGraph Graph, EGlooPrintWireStyle Style = EGlooPrintWireStyle::Rounded90);
     ~FRoutingJob();
     bool Advance(double Deadline);
-    bool TakeResult(FRouteSet& OutRoutes, FString& OutReason);
+    bool TakeResult(FRouteSet& OutRoutes, FString& OutReason, FLayoutGraph* OutSource = nullptr);
     int32 GetCompletedLinks() const;
 private:
     struct FState;

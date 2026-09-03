@@ -21,6 +21,7 @@ struct FFormatPlan
     FLayoutGraph Snapshot;
     FLayoutResult Layout;
     FRouteSet Routes;
+    FLayoutGraph RouteSource;
     int32 LayoutAttempts = 0;
     int32 CommentMeasurements = 0;
     int32 SpacingRepairs = 0;
@@ -29,7 +30,8 @@ struct FFormatPlan
 class FFormatJob final
 {
 public:
-    FFormatJob(UEdGraph* Graph, FLayoutGraph Snapshot, float Scale, FLayoutSettings Settings, EGlooPrintWireStyle Style);
+    FFormatJob(UEdGraph* Graph, FLayoutGraph Snapshot, float Scale, FLayoutSettings Settings, EGlooPrintWireStyle Style,
+        bool bRetainRouteSource = false);
     ~FFormatJob();
     bool Advance(double Deadline);
     bool TakePlan(FFormatPlan& OutPlan, FString& OutReason, bool* OutNeedsLayoutRetry = nullptr);

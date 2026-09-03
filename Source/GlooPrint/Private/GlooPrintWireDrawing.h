@@ -22,14 +22,22 @@ public:
     void Shutdown();
     void ObserveContext();
     void Invalidate(bool bContextChanged = true);
+    void StagePlannedRoutes(FLayoutGraph Source, FRouteSet PlannedRoutes, EGlooPrintWireStyle Style);
     const FRouteSet& GetRoutes() const { return Routes; }
     bool IsReady() const { return bReady; }
     int32 GetBuildCount() const { return BuildCount; }
-    bool HasPendingRouting() const { return Capture.IsValid() || Routing.IsValid(); }
+    int32 GetReusedPlanCount() const { return ReusedPlanCount; }
+    bool HasPendingRouting() const { return Capture.IsValid() || Routing.IsValid() || Planned.IsSet(); }
     UEdGraph* GetGraph() const { return Graph.Get(); }
     TSharedPtr<SGraphPanel> GetPanel() const { return Panel.Pin(); }
 
 private:
+    struct FPlannedRoutes
+    {
+        FLayoutGraph Source;
+        FRouteSet Routes;
+    };
+    TOptional<FPlannedRoutes> Planned;
     TUniquePtr<FGraphCaptureJob> Capture;
     TWeakPtr<FMeasurementCache> Measurements;
     uint64 MeasurementRevision = 0;
@@ -59,6 +67,7 @@ private:
     EGlooPrintWireStyle WireStyle = EGlooPrintWireStyle::Rounded90;
     int32 AttemptsLeft = 3;
     int32 BuildCount = 0;
+    int32 ReusedPlanCount = 0;
     bool bReady = false;
     bool bStopped = false;
 };

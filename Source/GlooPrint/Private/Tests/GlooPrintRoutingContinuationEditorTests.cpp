@@ -177,6 +177,111 @@ bool FRouteContinuationEditorTest::RunTest(const FString& Parameters)
     ADD_LATENT_AUTOMATION_COMMAND(FRouteContinuationCheck(*this)); return true;
 }
 
+class FPlannedRouteReuseCheck final : public IAutomationLatentCommand
+{
+public:
+    explicit FPlannedRouteReuseCheck(FAutomationTestBase& InTest) : Test(InTest) {}
+    virtual ~FPlannedRouteReuseCheck() { Restore(); }
+    virtual bool Update() override
+    {
+        auto& Slate = FSlateApplication::Get();
+        if (bClosing)
+        {
+            if (++ClosingFrames < 10) { return false; }
+            Test.TestFalse(TEXT("Closing the graph releases its staged route input and result"), WeakCache.IsValid());
+            return true;
+        }
+        if (!Fixture)
+        {
+            OriginalStyle = GetDefault<UGlooPrintSettings>()->WireStyle;
+            GetMutableDefault<UGlooPrintSettings>()->WireStyle = EGlooPrintWireStyle::Rounded90;
+            GetMutableDefault<UGlooPrintSettings>()->NotifyChanged();
+            Fixture = MakeUnique<FFixture>();
+            Editor = SNew(SGraphEditor).GraphToEdit(Fixture->Graph).IsEditable(true);
+            Window = SNew(SWindow).Title(FText::FromString(TEXT("GlooPrint validated route reuse")))
+                .ClientSize(FVector2f(1400, 1000))[Editor.ToSharedRef()];
+            Slate.AddWindow(Window.ToSharedRef());
+            Deadline = FPlatformTime::Seconds() + 45; return false;
+        }
+        if (FPlatformTime::Seconds() > Deadline) { Test.AddError(TEXT("Planned route reuse did not settle in 45 seconds.")); return true; }
+        auto* Panel = Editor->GetGraphPanel();
+        const auto Cache = Panel->GetMetaData<FRouteCache>();
+        if (!Cache || !Cache->IsReady()) { return false; }
+        FString Reason;
+        FLayoutGraph Current; FRouteSet Expected;
+        FMeasurementOptions Options; Options.PinVisibility = Panel->GetPinVisibility();
+        const float Scale = Window->GetDPIScaleFactor() * Slate.GetApplicationScale();
+        if (!Test.TestTrue(TEXT("Independent cold native routes are available"),
+            CaptureGraphForRouting(Fixture->Graph, Scale, Current, Reason, Options) && ComputeRoutes(Current, Expected, Reason)))
+        {
+            Test.AddError(Reason); return true;
+        }
+        if (bWaiting)
+        {
+            Test.TestEqual(TEXT("Only unchanged routing inputs reuse a plan"), Cache->GetReusedPlanCount(), ReusedBefore + (Case == 0 ? 1 : 0));
+            Test.TestEqual(TEXT("Reused or rebuilt result preserves every connection"), Cache->GetRoutes().Wires.Num(), Expected.Wires.Num());
+            for (const auto& Pair : Expected.Wires)
+            {
+                const auto* Actual = Cache->GetRoutes().Wires.Find(Pair.Key);
+                Test.TestTrue(TEXT("Published paths agree with independent cold routing"), Actual && Actual->Points == Pair.Value.Points && Actual->Fallback == Pair.Value.Fallback);
+            }
+            if (Test.HasAnyErrors()) { return true; }
+            if (++Case == 4)
+            {
+                Cache->Invalidate();
+                Cache->StagePlannedRoutes(MoveTemp(Current), MoveTemp(Expected), EGlooPrintWireStyle::Rounded90);
+                Test.TestTrue(TEXT("Staged reuse counts as pending work"), Cache->HasPendingRouting());
+                WeakCache = Cache; bClosing = true;
+                Window->RequestDestroyWindow(); Window.Reset(); Editor.Reset();
+                return false;
+            }
+        }
+        ReusedBefore = Cache->GetReusedPlanCount();
+        Cache->Invalidate();
+        Cache->StagePlannedRoutes(MoveTemp(Current), MoveTemp(Expected), EGlooPrintWireStyle::Rounded90);
+        Test.TestFalse(TEXT("Staging never publishes unvalidated routes"), Cache->IsReady());
+        Test.TestTrue(TEXT("Staged routes remain private"), Cache->GetRoutes().Wires.IsEmpty());
+        if (Case == 1) { Fixture->Print->NodePosY += 160; }
+        else if (Case == 2)
+        {
+            Fixture->Print->FindPinChecked(TEXT("InString"))->DefaultValue += TEXT(" a long unnotified default that changes the native input widget width");
+        }
+        else if (Case == 3)
+        {
+            auto* Input = Fixture->Print->FindPinChecked(UEdGraphSchema_K2::PN_Execute);
+            auto* Output = Input->LinkedTo[0];
+            Output->BreakLinkTo(Input);
+            Output->MakeLinkTo(Fixture->Branch->FindPinChecked(UEdGraphSchema_K2::PN_Execute));
+        }
+        bWaiting = true; return false;
+    }
+private:
+    void Restore()
+    {
+        if (Window) { Window->RequestDestroyWindow(); Window.Reset(); Editor.Reset(); }
+        if (Fixture)
+        {
+            GetMutableDefault<UGlooPrintSettings>()->WireStyle = OriginalStyle;
+            GetMutableDefault<UGlooPrintSettings>()->NotifyChanged(); Fixture.Reset();
+        }
+    }
+    FAutomationTestBase& Test;
+    TUniquePtr<FFixture> Fixture;
+    TSharedPtr<SGraphEditor> Editor;
+    TSharedPtr<SWindow> Window;
+    TWeakPtr<FRouteCache> WeakCache;
+    EGlooPrintWireStyle OriginalStyle = EGlooPrintWireStyle::Rounded90;
+    double Deadline = 0;
+    int32 Case = 0, ReusedBefore = 0, ClosingFrames = 0;
+    bool bWaiting = false, bClosing = false;
+};
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlannedRouteReuseEditorTest, "GlooPrint.Editor.PlannedRouteReuse",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FPlannedRouteReuseEditorTest::RunTest(const FString& Parameters)
+{
+    ADD_LATENT_AUTOMATION_COMMAND(FPlannedRouteReuseCheck(*this)); return true;
+}
+
 class FFormatContinuationCheck final : public IAutomationLatentCommand
 {
 public:

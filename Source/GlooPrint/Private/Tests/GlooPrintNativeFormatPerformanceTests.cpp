@@ -74,7 +74,12 @@ public:
         if (!Fixture) { return Start(); }
         if (FPlatformTime::Seconds() > Deadline)
         {
-            Test.AddError(TEXT("Native F benchmark exceeded its 180-second stage deadline. Last command message: ") + Completion.LastMessage);
+            const auto* Panel = Editor->GetGraphPanel();
+            const auto Routes = Panel->GetMetaData<FRouteCache>();
+            const auto Cache = Panel->GetMetaData<FMeasurementCache>();
+            Test.AddError(FString::Printf(TEXT("Native F benchmark exceeded its 180-second stage deadline: phase=%d, frames=%d, measurement entries=%d, route builds=%d, pending=%d. Last command message: %s"),
+                Phase, Frames, Cache ? Cache->GetEntryCount() : -1, Routes ? Routes->GetBuildCount() : -1,
+                Routes && Routes->HasPendingRouting(), *Completion.LastMessage));
             return Finish();
         }
         auto* Panel = Editor->GetGraphPanel();
@@ -84,12 +89,12 @@ public:
             if (!Completion.CompletedAt || !Routes || !Routes->IsReady()) { return false; }
             const double RoutesObservedMs = (FPlatformTime::Seconds() - StartedAt) * 1000;
             const double CommandMs = (FMath::Max(Completion.CompletedAt, DispatchEndedAt) - StartedAt) * 1000;
-            Csv += FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%d,%.6f,%.6f,%.6f,%llu,%d,%d,%d,%d\n"), *Family, Count, Pins, Count - 1, Sample,
+            Csv += FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%d,%.6f,%.6f,%.6f,%llu,%d,%d,%d,%d,%d\n"), *Family, Count, Pins, Count - 1, Sample,
                 Phase == 1 ? TEXT("Format") : TEXT("Repeat"), CacheEntriesBefore, DispatchMs, CommandMs, RoutesObservedMs,
-                Completion.CompletedFrame - StartedFrame, Completion.Changed, Routes->GetRoutes().FallbackCount, Completion.Hits, Completion.Misses);
+                Completion.CompletedFrame - StartedFrame, Completion.Changed, Routes->GetRoutes().FallbackCount, Completion.Hits, Completion.Misses, bRoutesReadyBefore);
             if (Sample >= 0) { (Phase == 1 ? FormatTimes : RepeatTimes).Add(CommandMs); }
             Test.TestEqual(TEXT("Completed F retains every original connection"), Routes->GetRoutes().Wires.Num(), Count - 1);
-            Test.TestEqual(TEXT("Completed chain has no native routing fallback"), Routes->GetRoutes().FallbackCount, 0);
+            Test.TestEqual(TEXT("Completed fixture has no native routing fallback"), Routes->GetRoutes().FallbackCount, 0);
             if (bKeepMeasurementCache && CacheEntriesBefore == Count)
             {
                 Test.TestEqual(TEXT("F reuses every node warmed by automatic routing"), Completion.Hits, Count);
@@ -98,6 +103,7 @@ public:
             CheckContext();
             if (Phase == 1)
             {
+                Test.TestEqual(TEXT("Post-format capture reuses the validated route plan"), Routes->GetReusedPlanCount(), ReusedPlansBefore + 1);
                 Test.TestTrue(TEXT("Actual F changes this unformatted graph"), Completion.Changed > 0);
                 Formatted = SerializeTransactionValues(*Fixture->Graph);
                 Test.TestTrue(TEXT("Successful format changes graph values"), Formatted != Before);
@@ -122,7 +128,9 @@ public:
             Test.TestTrue(TEXT("Every cold sample starts from the exact same graph"), Before == SerializeTransactionValues(*Fixture->Graph));
             Phase = 0; Frames = 0; Deadline = FPlatformTime::Seconds() + 180; return false;
         }
-        if (++Frames < 12 || !Routes || !Routes->IsReady()) { return false; }
+        const auto Measurements = Panel->GetMetaData<FMeasurementCache>();
+        const bool bWarmGeometry = bStartWithWarmGeometry && Phase == 0 && Measurements && Measurements->GetEntryCount() == Count;
+        if (++Frames < 12 || !Routes || (!Routes->IsReady() && !bWarmGeometry)) { return false; }
         if (Phase == 0)
         {
             if (Before.IsEmpty())
@@ -157,10 +165,24 @@ private:
         if (FParse::Param(FCommandLine::Get(), TEXT("GlooPrintBenchmarkWarmupOnly"))) { SamplesWanted = 0; }
         bKeepMeasurementCache = FParse::Param(FCommandLine::Get(), TEXT("GlooPrintKeepMeasurementCache"));
         bUseAssetEditor = FParse::Param(FCommandLine::Get(), TEXT("GlooPrintBenchmarkAssetEditor"));
+        bStartWithWarmGeometry = FParse::Param(FCommandLine::Get(), TEXT("GlooPrintBenchmarkStartWithWarmGeometry"));
+        if (bStartWithWarmGeometry && !bKeepMeasurementCache)
+        {
+            Test.AddError(TEXT("Warm-geometry start requires GlooPrintKeepMeasurementCache.")); return Finish();
+        }
         Directory = FPaths::ProjectSavedDir() / TEXT("GlooPrintBenchmarks"); IFileManager::Get().MakeDirectory(*Directory, true);
         Package.Reset(CreatePackage(*FString::Printf(TEXT("/Temp/GlooPrintNativeF_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
         Fixture = MakeUnique<FFixture>(UObject::StaticClass(), false, Package.Get());
-        if (!PopulateNativeChain(Test, *Fixture, Count, Family == TEXT("PinHeavy") ? 64 : 2, Entry, Pins)) { return Finish(); }
+        if (Family == TEXT("FanOut"))
+        {
+            if (!PopulateNativeFan(Test, *Fixture, Count, Entry, Pins)) { return Finish(); }
+        }
+        else
+        {
+            UK2Node_ExecutionSequence* ChainEntry = nullptr;
+            if (!PopulateNativeChain(Test, *Fixture, Count, Family == TEXT("PinHeavy") ? 64 : 2, ChainEntry, Pins)) { return Finish(); }
+            Entry = ChainEntry;
+        }
         if (bUseAssetEditor)
         {
             auto* Editors = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
@@ -186,6 +208,9 @@ private:
     void BeginRequest(bool bRepeat)
     {
         auto* Panel = Editor->GetGraphPanel(); const auto Cache = Panel->GetMetaData<FMeasurementCache>();
+        const auto Routes = Panel->GetMetaData<FRouteCache>();
+        ReusedPlansBefore = Routes ? Routes->GetReusedPlanCount() : 0;
+        bRoutesReadyBefore = Routes && Routes->IsReady();
         CacheEntriesBefore = Cache ? Cache->GetEntryCount() : 0;
         if (!bRepeat && !bKeepMeasurementCache) { Test.TestEqual(TEXT("Measured format begins with cold native measurement cache"), CacheEntriesBefore, 0); }
         Package->SetDirtyFlag(false); FSlateApplication::Get().SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
@@ -270,8 +295,9 @@ private:
         TArray64<uint8> Png; FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
         Test.TestTrue(TEXT("Save native F benchmark capture"), FFileHelper::SaveArrayToFile(Png, *(Directory / (Stem() + TEXT(".png")))));
     }
-    FString Stem() const { return FString::Printf(TEXT("%d-NativeFormat-%s%s%s"), Count, *Family,
-        bKeepMeasurementCache ? TEXT("-KeepCache") : TEXT(""), bUseAssetEditor ? TEXT("-AssetEditor") : TEXT("")); }
+    FString Stem() const { return FString::Printf(TEXT("%d-NativeFormat-%s%s%s%s"), Count, *Family,
+        bKeepMeasurementCache ? TEXT("-KeepCache") : TEXT(""), bUseAssetEditor ? TEXT("-AssetEditor") : TEXT(""),
+        bStartWithWarmGeometry ? TEXT("-WarmGeometry") : TEXT("")); }
     bool Finish()
     {
         if (!Directory.IsEmpty()) { Test.TestTrue(TEXT("Save all native F samples"), FFileHelper::SaveStringToFile(Csv, *(Directory / (Stem() + TEXT(".csv"))))); }
@@ -301,7 +327,7 @@ private:
     FFormatCompletion Completion;
     TStrongObjectPtr<UPackage> Package;
     TUniquePtr<FFixture> Fixture;
-    UK2Node_ExecutionSequence* Entry = nullptr;
+    UEdGraphNode* Entry = nullptr;
     TSharedPtr<SGraphEditor> Editor;
     TSharedPtr<SWindow> Window;
     FLayoutSettings OriginalSettings;
@@ -317,8 +343,10 @@ private:
     double Deadline = 0, StartedAt = 0, DispatchEndedAt = 0, DispatchMs = 0;
     uint64 StartedFrame = 0;
     int32 Phase = 0, Frames = 0, Sample = -1, SamplesWanted = 3, Pins = 0, AppliedQueue = 0, NoOpQueue = 0, NoOpUndo = 0, CacheEntriesBefore = 0;
+    int32 ReusedPlansBefore = 0;
     bool bRestore = false, bOriginalEnabled = true, bListening = false, bKeepMeasurementCache = false, bUseAssetEditor = false;
-    FString Csv = TEXT("family,nodes,pins,links,sample,operation,measurement_entries_before,initial_dispatch_ms,command_result_ms,routes_observed_ready_ms,command_frames,changed_nodes,fallbacks,measurement_hits,measurement_misses\n");
+    bool bStartWithWarmGeometry = false, bRoutesReadyBefore = false;
+    FString Csv = TEXT("family,nodes,pins,links,sample,operation,measurement_entries_before,initial_dispatch_ms,command_result_ms,routes_observed_ready_ms,command_frames,changed_nodes,fallbacks,measurement_hits,measurement_misses,routes_ready_before\n");
 };
 IMPLEMENT_COMPLEX_AUTOMATION_TEST(FNativeFormatPerformanceTest, "GlooPrint.Performance.NativeFormat",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::PerfFilter)
@@ -328,6 +356,7 @@ void FNativeFormatPerformanceTest::GetTests(TArray<FString>& Names, TArray<FStri
     {
         const FString Name = FString::Printf(TEXT("%d.%s"), Count, Family); Names.Add(Name); Commands.Add(Name);
     }
+    for (const TCHAR* Name : {TEXT("1000.FanOut"), TEXT("5000.FanOut")}) { Names.Add(Name); Commands.Add(Name); }
 }
 bool FNativeFormatPerformanceTest::RunTest(const FString& Parameters)
 {

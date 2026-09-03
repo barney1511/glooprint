@@ -773,16 +773,19 @@ bool FRoutingJob::Advance(double Deadline)
     return State->Phase == FState::EPhase::Done;
 }
 
-bool FRoutingJob::TakeResult(FRouteSet& OutRoutes, FString& OutReason)
+bool FRoutingJob::TakeResult(FRouteSet& OutRoutes, FString& OutReason, FLayoutGraph* OutSource)
 {
     OutRoutes = {}; OutReason.Reset();
+    if (OutSource) { *OutSource = {}; }
     if (State->Phase != FState::EPhase::Done || State->bTaken)
     {
         OutReason = TEXT("Routing result is not available."); return false;
     }
     OutReason = State->Reason;
     if (!OutReason.IsEmpty()) { return false; }
-    State->bTaken = true; OutRoutes = MoveTemp(State->Result); return true;
+    State->bTaken = true; OutRoutes = MoveTemp(State->Result);
+    if (OutSource) { *OutSource = MoveTemp(State->Graph); }
+    return true;
 }
 
 int32 FRoutingJob::GetCompletedLinks() const { return State->NextRoute; }

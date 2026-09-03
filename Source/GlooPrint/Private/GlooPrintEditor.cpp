@@ -1,6 +1,7 @@
 #include "GlooPrintEditor.h"
 #include "GlooPrintMeasurementCache.h"
 #include "GlooPrintSettings.h"
+#include "GlooPrintWireDrawing.h"
 
 #include "EdGraph/EdGraph.h"
 #include "EdGraphNode_Comment.h"
@@ -173,8 +174,10 @@ struct FFormatJob::FState
     int32 Repair = 0, Pass = 0, HeaderIndex = 0;
     bool bChangedHeader = false, bHaveCandidate = false, bFailed = false, bNeedsRetry = false, bTaken = false;
 
-    FState(UEdGraph* InGraph, FLayoutGraph Snapshot, float InScale, FLayoutSettings InSettings, EGlooPrintWireStyle InStyle)
-        : Graph(InGraph), Settings(InSettings), Style(InStyle == EGlooPrintWireStyle::Native ? EGlooPrintWireStyle::Rounded90 : InStyle), Scale(InScale)
+    bool bRetainRouteSource;
+    FState(UEdGraph* InGraph, FLayoutGraph Snapshot, float InScale, FLayoutSettings InSettings, EGlooPrintWireStyle InStyle, bool bInRetainRouteSource)
+        : Graph(InGraph), Settings(InSettings), Style(InStyle == EGlooPrintWireStyle::Native ? EGlooPrintWireStyle::Rounded90 : InStyle), Scale(InScale),
+          bRetainRouteSource(bInRetainRouteSource)
     {
         if (!IsValid(InGraph)) { Fail(TEXT("The graph closed before planning.")); return; }
         Plan.Snapshot = MoveTemp(Snapshot); Working = Plan.Snapshot;
@@ -205,8 +208,8 @@ struct FFormatJob::FState
     }
 };
 
-FFormatJob::FFormatJob(UEdGraph* Graph, FLayoutGraph Snapshot, float Scale, FLayoutSettings Settings, EGlooPrintWireStyle Style)
-    : State(MakeUnique<FState>(Graph, MoveTemp(Snapshot), Scale, Settings, Style)) {}
+FFormatJob::FFormatJob(UEdGraph* Graph, FLayoutGraph Snapshot, float Scale, FLayoutSettings Settings, EGlooPrintWireStyle Style, bool bRetainRouteSource)
+    : State(MakeUnique<FState>(Graph, MoveTemp(Snapshot), Scale, Settings, Style, bRetainRouteSource)) {}
 FFormatJob::~FFormatJob() = default;
 
 bool FFormatJob::Advance(double Deadline)
@@ -279,13 +282,15 @@ bool FFormatJob::Advance(double Deadline)
             }
             if (!S.RoutingJob->Advance(Deadline)) { return false; }
             FRouteSet Routes;
-            const bool bSuccess = S.RoutingJob->TakeResult(Routes, S.Reason);
+            FLayoutGraph RouteSource;
+            const bool bSuccess = S.RoutingJob->TakeResult(Routes, S.Reason, S.bRetainRouteSource ? &RouteSource : nullptr);
             S.RoutingJob.Reset();
             if (!bSuccess) { S.Fail(S.Reason); return true; }
             if (!S.bHaveCandidate || Routes.FallbackCount < S.Plan.Routes.FallbackCount)
             {
                 S.bHaveCandidate = true; S.Plan.Layout = MoveTemp(S.Layout);
                 S.Plan.Routes = MoveTemp(Routes); S.Plan.SpacingRepairs = S.Repair;
+                S.Plan.RouteSource = MoveTemp(RouteSource);
             }
             if (S.Plan.Routes.FallbackCount == 0) { S.Finish(); }
             else { S.NextRepair(); }
@@ -546,7 +551,8 @@ void FEditor::ContinueRequest(FPendingFormat Request, double Deadline)
             FLayoutGraph Snapshot;
             if (Request.Capture->TakeResult(Snapshot, Reason, &bNeedsRetry))
             {
-                Request.Job = MakeUnique<FFormatJob>(Request.Graph.Get(), MoveTemp(Snapshot), Request.Scale, Request.Settings, Request.Style);
+                Request.Job = MakeUnique<FFormatJob>(Request.Graph.Get(), MoveTemp(Snapshot), Request.Scale, Request.Settings, Request.Style,
+                    Request.Style != EGlooPrintWireStyle::Native);
             }
             Request.Capture.Reset();
         }
@@ -577,6 +583,15 @@ void FEditor::ContinueRequest(FPendingFormat Request, double Deadline)
         {
             const auto Cache = Request.Cache.Pin();
             bSuccess = ApplyFormatPlan(Request.Graph.Get(), Plan, Changed, Reason, Cache.Get());
+            if (bSuccess && Changed > 0)
+            {
+                const auto Panel = Request.Panel.Pin();
+                const auto Routes = Panel ? Panel->GetMetaData<FRouteCache>() : nullptr;
+                if (Routes && Routes->GetGraph() == Request.Graph.Get())
+                {
+                    Routes->StagePlannedRoutes(MoveTemp(Plan.RouteSource), MoveTemp(Plan.Routes), Request.Style);
+                }
+            }
         }
     }
     else if (bNeedsRetry) { Reason = TEXT("Geometry is still unavailable after three deferred attempts. ") + Reason; }

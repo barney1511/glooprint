@@ -39,7 +39,7 @@ void FRouteCache::Initialize(TSharedRef<SGraphPanel> InPanel)
 void FRouteCache::Shutdown()
 {
     if (bStopped) { return; }
-    bStopped = true; bReady = false; Routes = {}; Capture.Reset(); Routing.Reset();
+    bStopped = true; bReady = false; Routes = {}; Capture.Reset(); Routing.Reset(); Planned.Reset();
     if (const auto Owner = Panel.Pin())
     {
         if (const auto Cache = Measurements.Pin(); Cache && Owner->GetMetaData<FMeasurementCache>() == Cache)
@@ -80,7 +80,7 @@ void FRouteCache::Invalidate(bool bContextChanged)
 {
     if (bStopped) { return; }
     if (const auto Cache = Measurements.Pin()) { Cache->Invalidate(bContextChanged); }
-    bReady = false; Routes = {}; Capture.Reset(); Routing.Reset(); ++Revision; AttemptsLeft = 3;
+    bReady = false; Routes = {}; Capture.Reset(); Routing.Reset(); Planned.Reset(); ++Revision; AttemptsLeft = 3;
     WireStyle = GetDefault<UGlooPrintSettings>()->GetWireStyle();
     if (WireStyle == EGlooPrintWireStyle::Native)
     {
@@ -94,6 +94,42 @@ void FRouteCache::Schedule()
 {
     if (bStopped || RebuildHandle.IsValid()) { return; }
     RebuildHandle = FSlateApplication::Get().OnPostTick().AddSP(this, &FRouteCache::OnPostTick);
+}
+
+void FRouteCache::StagePlannedRoutes(FLayoutGraph Source, FRouteSet PlannedRoutes, EGlooPrintWireStyle Style)
+{
+    check(IsInGameThread());
+    ObserveContext();
+    if (bStopped || bReady || !Graph.IsValid() || !Panel.IsValid() ||
+        Style == EGlooPrintWireStyle::Native || Style != WireStyle) { return; }
+    Planned.Emplace(FPlannedRoutes{MoveTemp(Source), MoveTemp(PlannedRoutes)});
+    Capture.Reset(); Routing.Reset();
+    Schedule();
+}
+
+static bool SameRoutingInputs(const FLayoutGraph& A, const FLayoutGraph& B)
+{
+    if (A.Nodes.Num() != B.Nodes.Num() || A.Pins.Num() != B.Pins.Num() || A.Edges.Num() != B.Edges.Num()) { return false; }
+    for (int32 I = 0; I < A.Nodes.Num(); ++I)
+    {
+        const auto& X = A.Nodes[I]; const auto& Y = B.Nodes[I];
+        if (X.Geometry.Id != Y.Geometry.Id || X.Geometry.Position != Y.Geometry.Position ||
+            X.Geometry.BodySize != Y.Geometry.BodySize || X.Geometry.VisualBounds != Y.Geometry.VisualBounds ||
+            X.Geometry.CommentHeader != Y.Geometry.CommentHeader || X.bComment != Y.bComment ||
+            X.bReroute != Y.bReroute || X.FirstPin != Y.FirstPin || X.PinCount != Y.PinCount) { return false; }
+    }
+    for (int32 I = 0; I < A.Pins.Num(); ++I)
+    {
+        const auto& X = A.Pins[I]; const auto& Y = B.Pins[I];
+        if (X.Id != Y.Id || X.Node != Y.Node || X.Ordinal != Y.Ordinal || X.bOutput != Y.bOutput ||
+            X.Kind != Y.Kind || X.Offset != Y.Offset) { return false; }
+    }
+    for (int32 I = 0; I < A.Edges.Num(); ++I)
+    {
+        const auto& X = A.Edges[I]; const auto& Y = B.Edges[I];
+        if (X.From != Y.From || X.To != Y.To || X.Kind != Y.Kind) { return false; }
+    }
+    return true;
 }
 
 void FRouteCache::OnPostTick(float DeltaTime)
@@ -112,13 +148,13 @@ bool FRouteCache::Rebuild(float DeltaTime)
     const auto Owner = Panel.Pin();
     if (bStopped || !Owner || !Graph.IsValid() || Owner->GetGraphObj() != Graph.Get())
     {
-        Capture.Reset(); Routing.Reset();
+        Capture.Reset(); Routing.Reset(); Planned.Reset();
         return false;
     }
     if (!FSlateApplication::Get().GetPressedMouseButtons().IsEmpty()) { return true; }
     ObserveContext();
     if (WireStyle == EGlooPrintWireStyle::Native) { return false; }
-    const double Deadline = FPlatformTime::Seconds() + 0.004;
+    const double Started = FPlatformTime::Seconds();
     FString Reason;
     if (!Routing)
     {
@@ -129,7 +165,7 @@ bool FRouteCache::Rebuild(float DeltaTime)
         }
         if (!Capture)
         {
-            if (!ValidateMeasurementGraph(Graph.Get(), Reason)) { Owner->Invalidate(EInvalidateWidgetReason::Paint); return false; }
+            if (!ValidateMeasurementGraph(Graph.Get(), Reason)) { Planned.Reset(); Owner->Invalidate(EInvalidateWidgetReason::Paint); return false; }
             auto Cache = Owner->GetMetaData<FMeasurementCache>();
             if (!Cache)
             {
@@ -144,7 +180,7 @@ bool FRouteCache::Rebuild(float DeltaTime)
         const uint64 RequestRevision = RoutingRevision;
         const uint64 RequestMeasurementRevision = MeasurementRevision;
         auto Job = MoveTemp(Capture);
-        const bool bFinished = Job->Advance(Deadline);
+        const bool bFinished = Job->Advance(Started + 0.008);
         if (bStopped) { return false; }
         if (Revision != RequestRevision) { return true; }
         const auto CurrentMeasurements = Measurements.Pin();
@@ -156,15 +192,23 @@ bool FRouteCache::Rebuild(float DeltaTime)
         if (!Job->TakeResult(Snapshot, Reason, &bRetry))
         {
             if (bRetry && AttemptsLeft-- > 0) { return true; }
+            Planned.Reset();
             Owner->Invalidate(EInvalidateWidgetReason::Paint);
             return false;
         }
+        if (Planned && SameRoutingInputs(Snapshot, Planned->Source))
+        {
+            Routes = MoveTemp(Planned->Routes); Planned.Reset(); bReady = true; ++ReusedPlanCount;
+            Owner->Invalidate(EInvalidateWidgetReason::Paint);
+            return false;
+        }
+        Planned.Reset();
         Routing = MakeUnique<FRoutingJob>(MoveTemp(Snapshot), WireStyle);
         RoutingRevision = RequestRevision;
     }
     auto Job = MoveTemp(Routing);
     const uint64 JobRevision = RoutingRevision;
-    const bool bFinished = Job->Advance(Deadline);
+    const bool bFinished = Job->Advance(Started + 0.004);
     if (Revision != JobRevision) { return true; }
     if (!bFinished) { Routing = MoveTemp(Job); return true; }
     FRouteSet Result;
