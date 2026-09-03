@@ -73,8 +73,7 @@ bool ApplyLayout(UEdGraph* Graph, const FLayoutGraph& Snapshot, const FLayoutRes
     Pins.Reserve(Snapshot.Pins.Num());
     TMap<const UEdGraphPin*, int32> PinIndices;
     PinIndices.Reserve(Snapshot.Pins.Num());
-    TArray<int32> Changed; Changed.Reserve(Count);
-    bool bResizedComment = false;
+    TArray<int32> Changed;
     for (int32 I = 0; I < Count; ++I)
     {
         const FLayoutNode& Original = Snapshot.Nodes[I];
@@ -112,7 +111,6 @@ bool ApplyLayout(UEdGraph* Graph, const FLayoutGraph& Snapshot, const FLayoutRes
                 OutReason = TEXT("A changed node does not support editor undo transactions."); return false;
             }
             Changed.Add(I);
-            bResizedComment |= Original.bComment && Layout.Sizes[I] != Original.OriginalSize;
         }
     }
     TSet<uint64> ExpectedLinks;
@@ -151,26 +149,7 @@ bool ApplyLayout(UEdGraph* Graph, const FLayoutGraph& Snapshot, const FLayoutRes
             }
         }
     }
-    {
-        TRACE_CPUPROFILER_EVENT_SCOPE(GlooPrint_NotifyLayout);
-        if (bResizedComment)
-        {
-            Graph->NotifyGraphChanged();
-        }
-        else
-        {
-            TArray<TWeakObjectPtr<UEdGraphNode>> Notifications;
-            Notifications.Reserve(Changed.Num());
-            for (int32 I : Changed) { Notifications.Add(Nodes[I]); }
-            const TWeakObjectPtr<UEdGraph> LiveGraph = Graph;
-            for (const auto& Subject : Notifications)
-            {
-                UEdGraphNode* Node = Subject.Get();
-                if (!LiveGraph.IsValid()) { break; }
-                if (Node && Node->GetGraph() == LiveGraph.Get()) { LiveGraph->NotifyNodeChanged(Node); }
-            }
-        }
-    }
+    Graph->NotifyGraphChanged();
     ChangedNodes = Changed.Num();
     return true;
 }

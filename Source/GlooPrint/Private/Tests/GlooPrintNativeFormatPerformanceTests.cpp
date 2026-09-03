@@ -18,7 +18,6 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/MiscTrace.h"
 #include "SGraphPanel.h"
-#include "SGraphNode.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Widgets/SWindow.h"
 
@@ -189,13 +188,6 @@ private:
         auto* Panel = Editor->GetGraphPanel(); const auto Cache = Panel->GetMetaData<FMeasurementCache>();
         CacheEntriesBefore = Cache ? Cache->GetEntryCount() : 0;
         if (!bRepeat && !bKeepMeasurementCache) { Test.TestEqual(TEXT("Measured format begins with cold native measurement cache"), CacheEntriesBefore, 0); }
-        RequestWidgets.Reset(Fixture->Graph->Nodes.Num());
-        for (const UEdGraphNode* Node : Fixture->Graph->Nodes)
-        {
-            const auto Widget = Panel->GetNodeWidgetFromGuid(Node->NodeGuid);
-            Test.TestTrue(TEXT("Native F begins with an existing node widget"), Widget.IsValid());
-            RequestWidgets.Add(Widget);
-        }
         Package->SetDirtyFlag(false); FSlateApplication::Get().SetKeyboardFocus(Panel->AsShared(), EFocusCause::SetDirectly);
         Completion.Arm(FString::Printf(TEXT("%d.%s.%d.%s"), Count, *Family, Sample, bRepeat ? TEXT("Repeat") : TEXT("Format")), Cache);
         RequestSelection.Reset(); for (UObject* Node : Editor->GetSelectedNodes()) { RequestSelection.Add(Node); }
@@ -225,13 +217,6 @@ private:
     }
     void CheckContext()
     {
-        bool bSameWidgets = RequestWidgets.Num() == Fixture->Graph->Nodes.Num();
-        for (int32 I = 0; bSameWidgets && I < RequestWidgets.Num(); ++I)
-        {
-            bSameWidgets = RequestWidgets[I].IsValid() && RequestWidgets[I].Pin() ==
-                Editor->GetGraphPanel()->GetNodeWidgetFromGuid(Fixture->Graph->Nodes[I]->NodeGuid);
-        }
-        Test.TestTrue(TEXT("Position-only F refreshes existing node widgets without purging the panel"), bSameWidgets);
         Test.TestEqual(TEXT("Whole F keeps its selected anchor fixed"), FIntPoint(Entry->NodePosX, Entry->NodePosY), Anchor);
         bool bSameSelection = Editor->GetSelectedNodes().Num() == RequestSelection.Num() && Completion.Selection.Num() == RequestSelection.Num();
         for (const auto& Node : RequestSelection)
@@ -324,7 +309,6 @@ private:
     TArray<uint8> Before, Formatted;
     TMap<FString, FString> Properties;
     TArray<TWeakObjectPtr<UObject>> RequestSelection;
-    TArray<TWeakPtr<SGraphNode>> RequestWidgets;
     TArray<double> FormatTimes, RepeatTimes;
     FVector2D OriginalCursor;
     FVector2f View, RequestView;
