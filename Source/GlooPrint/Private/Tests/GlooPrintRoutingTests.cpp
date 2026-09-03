@@ -73,7 +73,7 @@ bool FGrowingObstacleTest::RunTest(const FString& Parameters)
     Routing::FObstacles Index;
     const int32 Id = Index.Add(FBox2f({0, 244}, {100, 268}), 7);
     for (const FBox2f Box : {FBox2f({-300, 244}, {600, 268}),
-        FBox2f({-40000, 244}, {40000, 268}), FBox2f({-100000, 244}, {100000, 268})})
+        FBox2f({-20000, 244}, {20000, 268}), FBox2f({-100000, 244}, {100000, 268})})
     {
         Index.GrowHorizontal(Id, Box);
         for (float X : {Box.Min.X + 1, 50.f, Box.Max.X - 1})
