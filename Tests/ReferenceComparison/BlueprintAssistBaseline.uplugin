@@ -1,0 +1,9 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1",
+  "FriendlyName": "GlooPrint reference benchmark",
+  "CanContainContent": false,
+  "Modules": [{"Name": "BlueprintAssistBaseline", "Type": "EditorNoCommandlet", "LoadingPhase": "PostEngineInit"}],
+  "Plugins": [{"Name": "BlueprintAssist", "Enabled": true}]
+}
