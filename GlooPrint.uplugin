@@ -3,7 +3,7 @@
   "Version": 1,
   "VersionName": "0.1.0-dev",
   "FriendlyName": "GlooPrint",
-  "Description": "Blueprint graph formatting. Current development milestone: read-only graph geometry prototype.",
+  "Description": "Blueprint graph formatting with configurable wire routing and styles.",
   "Category": "Editor",
   "EngineVersion": "5.8.0",
   "CanContainContent": false,
