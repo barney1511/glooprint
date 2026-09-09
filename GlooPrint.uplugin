@@ -10,7 +10,7 @@
   "Modules": [
     {
       "Name": "GlooPrint",
-      "Type": "Editor",
+      "Type": "EditorNoCommandlet",
       "LoadingPhase": "PostEngineInit"
     }
   ]
