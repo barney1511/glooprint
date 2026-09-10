@@ -23,7 +23,7 @@
     {
       "Name": "GlooPrint",
       "Type": "EditorNoCommandlet",
-      "LoadingPhase": "PostEngineInit"
+      "LoadingPhase": "PostEngineInit",
       "PlatformAllowList": [
         "Win64",
         "Mac"
